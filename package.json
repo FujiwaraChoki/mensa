@@ -1,0 +1,44 @@
+{
+  "name": "mensa",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri"
+  },
+  "license": "MIT WITH Commons-Clause",
+  "author": {
+    "name": "Sami Hindi",
+    "email": "sami@samihindi.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FujiwaraChoki/mensa.git"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.9",
+    "@pierre/diffs": "^1.0.6",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-shell": "^2.3.4",
+    "marked": "^17.0.1",
+    "nucleo-glass-icons": "^0.1.11"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "@tauri-apps/cli": "^2"
+  }
+}
