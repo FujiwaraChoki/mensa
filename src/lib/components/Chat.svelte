@@ -752,7 +752,7 @@
   aria-label="Chat"
 >
   <!-- Header -->
-  <header class="header drag-region">
+  <header class="header drag-region" data-tauri-drag-region>
     <div class="header-center no-drag">
       <div class="workspace-wrapper">
         <button class="workspace-btn" onclick={toggleWorkspaceMenu} title="Change workspace">
