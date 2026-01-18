@@ -67,6 +67,18 @@ export interface ToolExecution {
   output?: string;
   startedAt: Date;
   completedAt?: Date;
+  parentSubagentId?: string;  // If this tool belongs to a subagent
+}
+
+export interface SubagentGroup {
+  id: string;
+  taskToolId: string;        // The parent Task tool's ID
+  description: string;       // From Task input (e.g., "Explore codebase")
+  subagentType: string;      // e.g., "Explore", "Plan"
+  status: 'running' | 'completed' | 'error';
+  childToolIds: string[];    // IDs of tools executed by this subagent
+  startedAt: Date;
+  completedAt?: Date;
 }
 
 export type ToolName =
@@ -80,6 +92,7 @@ export type ToolName =
   | 'WebFetch'
   | 'Task'
   | 'TodoWrite'
+  | 'Skill'
   | (string & {}); // Allow any string for unknown tools
 
 export interface WorkspaceConfig {
@@ -105,10 +118,25 @@ export interface MCPServerConfig {
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions';
 
+// Skills configuration
+export type SettingSource = 'user' | 'project';
+
+export interface SkillsConfig {
+  enabled: boolean;
+  settingSources: SettingSource[];
+}
+
+export interface SlashCommand {
+  name: string;
+  description?: string;
+  source: SettingSource;
+}
+
 export interface ClaudeConfig {
   permissionMode: PermissionMode;
   maxTurns: number;
   mcpServers: MCPServerConfig[];
+  skills: SkillsConfig;
 }
 
 export interface AppConfig {
@@ -116,3 +144,16 @@ export interface AppConfig {
   onboardingCompleted: boolean;
   claude?: ClaudeConfig;
 }
+
+// @ Mention types
+export type MentionType = 'file' | 'skill';
+
+export interface MentionItem {
+  type: MentionType;
+  value: string;        // path for files, name for skills
+  displayName: string;  // shown in UI
+  isDirectory?: boolean; // for file navigation
+}
+
+// Re-export session types from the store for convenience
+export type { SessionStatus, SessionState } from '$lib/stores/sessions.svelte';

@@ -6,7 +6,7 @@
   }
 
   let { patch }: Props = $props();
-  let container: HTMLDivElement;
+  let container = $state<HTMLDivElement | null>(null);
   let error = $state<string | null>(null);
 
   onMount(async () => {
@@ -38,6 +38,7 @@
         }
       });
 
+      if (!container) return;
       container.innerHTML = '';
 
       for (const file of files) {

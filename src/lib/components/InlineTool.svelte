@@ -5,14 +5,15 @@
 
   interface Props {
     tool: ToolExecution;
+    compact?: boolean;  // Reduced padding/margin for nested display
   }
 
-  let { tool }: Props = $props();
+  let { tool, compact = false }: Props = $props();
 
   let expanded = $state(false);
   const patch = $derived(getPatchForTool(tool));
 
-  const toolIcons: Record<ToolName, string> = {
+  const toolIcons: Partial<Record<ToolName, string>> = {
     Read: '◇',
     Write: '◆',
     Edit: '✎',
@@ -22,7 +23,8 @@
     WebSearch: '◉',
     WebFetch: '↗',
     Task: '⟡',
-    TodoWrite: '☐'
+    TodoWrite: '☐',
+    Skill: '★'
   };
 
   function formatInput(input: string | undefined, toolName: ToolName): string {
@@ -81,6 +83,18 @@
       try {
         const parsed = JSON.parse(input);
         return parsed.description || parsed.subagent_type || input.slice(0, 30);
+      } catch {
+        return input.slice(0, 30);
+      }
+    }
+
+    // For Skill, show the skill name and args
+    if (toolName === 'Skill') {
+      try {
+        const parsed = JSON.parse(input);
+        const skillName = parsed.skill || 'unknown';
+        const args = parsed.args ? ` ${parsed.args.slice(0, 20)}...` : '';
+        return `/${skillName}${args}`;
       } catch {
         return input.slice(0, 30);
       }
@@ -189,7 +203,7 @@
   }
 </script>
 
-<div class="inline-tool" class:expanded class:running={tool.status === 'running'} class:error={tool.status === 'error'}>
+<div class="inline-tool" class:expanded class:running={tool.status === 'running'} class:error={tool.status === 'error'} class:compact>
   <button class="tool-header" onclick={toggle} type="button">
     <span class="tool-icon" class:spinning={tool.status === 'running'}>
       {toolIcons[tool.tool] || '⚡'}
@@ -401,5 +415,37 @@
     border-radius: 4px;
     background: var(--white);
     overflow: hidden;
+  }
+
+  /* Compact mode for nested tools */
+  .inline-tool.compact {
+    margin-bottom: 0.25rem;
+    border-radius: 6px;
+  }
+
+  .inline-tool.compact .tool-header {
+    padding: 0.375rem 0.5rem;
+    gap: 0.375rem;
+  }
+
+  .inline-tool.compact .tool-icon {
+    font-size: 11px;
+  }
+
+  .inline-tool.compact .tool-name {
+    font-size: 11px;
+  }
+
+  .inline-tool.compact .tool-summary {
+    font-size: 10px;
+  }
+
+  .inline-tool.compact .tool-details {
+    padding: 0 0.5rem 0.5rem;
+  }
+
+  .inline-tool.compact .detail-content {
+    font-size: 10px;
+    max-height: 150px;
   }
 </style>

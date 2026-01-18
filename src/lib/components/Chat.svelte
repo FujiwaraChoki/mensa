@@ -4,26 +4,96 @@
   import { tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { invoke } from '@tauri-apps/api/core';
-  import { messages, uiState, appConfig, appState, toolActivity, pendingAttachments } from '$lib/stores/app.svelte';
+  import { uiState, appConfig, pendingAttachments, slashCommands } from '$lib/stores/app.svelte';
+  import { sessionStore } from '$lib/stores/sessions.svelte';
   import { queryClaudeStreaming, type ClaudeStreamEvent, type ClaudeQueryConfig } from '$lib/services/claude';
   import { openFilePicker, processFile, handlePasteImage, handleDroppedFiles, buildMessageContent, formatFileSize } from '$lib/services/attachments';
-  import type { Attachment, ContentBlock, Message, MessageBlock } from '$lib/types';
+  import type { Attachment, ContentBlock, Message, MessageBlock, MentionItem } from '$lib/types';
+  import { listWorkspaceFiles, filterMentionItems } from '$lib/services/files';
   import Markdown from './Markdown.svelte';
   import Settings from './Settings.svelte';
   import CommandPalette from './CommandPalette.svelte';
   import InlineTool from './InlineTool.svelte';
+  import SubagentGroup from './SubagentGroup.svelte';
+  import SessionTabs from './SessionTabs.svelte';
 
   let inputValue = $state('');
   let showSettings = $state(false);
   let showCommandPalette = $state(false);
+  let showSessionPicker = $state(false);
+  let sessionPickerIndex = $state(0);
   let lightboxImage = $state<{ src: string; alt: string } | null>(null);
   let inputEl: HTMLTextAreaElement;
   let messagesEl: HTMLDivElement;
   let showWorkspaceMenu = $state(false);
-  let pendingTools = $state<Map<string, string>>(new Map()); // tool id/name -> tool activity id
   let resumeSessionId = $state<string | null>(null);
   let loadingSession = $state(false);
   let isDragging = $state(false);
+
+  // Derived state from session store
+  const currentSession = $derived(sessionStore.activeSession);
+  const currentMessages = $derived(currentSession?.messages ?? []);
+  const isStreaming = $derived(currentSession?.status === 'streaming');
+  const currentSubagentGroups = $derived(currentSession?.subagentGroups ?? []);
+
+  // Helper to get subagent group by task tool ID from current session
+  function getGroupByTaskToolId(taskToolId: string) {
+    return currentSubagentGroups.find(g => g.taskToolId === taskToolId);
+  }
+
+  // Slash command autocomplete state
+  let showSlashMenu = $state(false);
+  let slashMenuIndex = $state(0);
+  let slashFilter = $state('');
+
+  // @ mention autocomplete state
+  let showMentionMenu = $state(false);
+
+  // Request notification permission on mount
+  $effect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  });
+
+  // Send system notification when assistant is done (only if app is in background)
+  function sendCompletionNotification() {
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification('Mensa', {
+        body: 'Assistant has finished responding',
+        icon: '/favicon.png'
+      });
+    }
+  }
+  let mentionMenuIndex = $state(0);
+  let mentionFilter = $state('');
+  let mentionStartIndex = $state(-1); // Position of @ in input
+  let mentionCurrentPath = $state(''); // Current directory being browsed
+  let mentionItems = $state<MentionItem[]>([]);
+
+  // Computed: filtered slash commands based on input
+  const filteredSlashCommands = $derived(() => {
+    if (!slashFilter) return slashCommands.all;
+    const filter = slashFilter.toLowerCase();
+    return slashCommands.all.filter(cmd =>
+      cmd.name.toLowerCase().includes(filter) ||
+      cmd.description?.toLowerCase().includes(filter)
+    );
+  });
+
+  // Computed: combined mention items (files + skills)
+  const filteredMentionItems = $derived(() => {
+    // Convert skills to mention items
+    const skillItems: MentionItem[] = slashCommands.all.map(cmd => ({
+      type: 'skill' as const,
+      value: cmd.name,
+      displayName: cmd.name,
+    }));
+
+    // Combine and filter
+    const allItems = [...mentionItems, ...skillItems];
+    return filterMentionItems(allItems, mentionFilter);
+  });
 
   interface SessionMessage {
     role: string;
@@ -46,18 +116,23 @@
     >;
   }
 
-  async function loadSessionHistory(sessionId: string) {
+  async function loadSessionHistory(claudeSessionId: string) {
     loadingSession = true;
     try {
       const workspacePath = appConfig.workspace?.path || '.';
       const sessionMessages = await invoke<SessionMessage[]>('load_session_messages', {
         workspacePath,
-        sessionId
+        sessionId: claudeSessionId
       });
+
+      // Create or get a session for this Claude session
+      const newSessionId = sessionStore.createSession();
+      sessionStore.switchToSession(newSessionId);
+      sessionStore.setClaudeSessionId(newSessionId, claudeSessionId);
 
       // Convert to our message format and add to store
       for (const msg of sessionMessages) {
-        messages.add({
+        sessionStore.addMessage(newSessionId, {
           role: msg.role as 'user' | 'assistant',
           content: msg.content,
           timestamp: new Date(msg.timestamp),
@@ -100,7 +175,152 @@
     });
   }
 
+  async function handleInput() {
+    const value = inputValue;
+
+    // Check for slash command trigger (at start of input)
+    if (value.startsWith('/') && !value.includes(' ')) {
+      showSlashMenu = slashCommands.count > 0;
+      slashFilter = value.slice(1);
+      slashMenuIndex = 0;
+      showMentionMenu = false;
+      return;
+    } else {
+      showSlashMenu = false;
+      slashFilter = '';
+    }
+
+    // Check for @ mention trigger
+    // Find the last @ that isn't already completed (no space after the mention text)
+    const atMatch = value.match(/@([^\s@]*)$/);
+    if (atMatch) {
+      const filterText = atMatch[1];
+      mentionStartIndex = value.length - atMatch[0].length;
+      mentionFilter = filterText;
+      mentionMenuIndex = 0;
+
+      // Check if filter contains a path separator - load that directory
+      const lastSlashIdx = filterText.lastIndexOf('/');
+      if (lastSlashIdx >= 0) {
+        const dirPath = filterText.substring(0, lastSlashIdx);
+        if (dirPath !== mentionCurrentPath) {
+          mentionCurrentPath = dirPath;
+          await loadMentionFiles(dirPath);
+        }
+        // Update filter to just the part after the last /
+        mentionFilter = filterText.substring(lastSlashIdx + 1);
+      } else if (mentionCurrentPath !== '') {
+        // Reset to root if no path separator
+        mentionCurrentPath = '';
+        await loadMentionFiles('');
+      } else if (mentionItems.length === 0) {
+        // Initial load
+        await loadMentionFiles('');
+      }
+
+      showMentionMenu = true;
+    } else {
+      showMentionMenu = false;
+      mentionFilter = '';
+      mentionStartIndex = -1;
+    }
+  }
+
+  async function loadMentionFiles(relativePath: string) {
+    const workspacePath = appConfig.workspace?.path;
+    if (!workspacePath) {
+      mentionItems = [];
+      return;
+    }
+    mentionItems = await listWorkspaceFiles(workspacePath, relativePath);
+  }
+
+  function selectSlashCommand(commandName: string) {
+    inputValue = '/' + commandName + ' ';
+    showSlashMenu = false;
+    slashFilter = '';
+    inputEl?.focus();
+  }
+
+  async function selectMention(item: MentionItem) {
+    // If it's a directory, navigate into it
+    if (item.isDirectory) {
+      const newPath = mentionCurrentPath ? `${mentionCurrentPath}/${item.displayName}` : item.displayName;
+      // Replace the current @ mention with the directory path
+      const beforeAt = inputValue.substring(0, mentionStartIndex);
+      inputValue = beforeAt + '@' + newPath + '/';
+      mentionCurrentPath = newPath;
+      mentionFilter = '';
+      mentionMenuIndex = 0;
+      await loadMentionFiles(newPath);
+      inputEl?.focus();
+      return;
+    }
+
+    // For files and skills, insert the completed mention
+    const beforeAt = inputValue.substring(0, mentionStartIndex);
+    const prefix = item.type === 'file' ? '' : '/';
+    inputValue = beforeAt + prefix + item.value + ' ';
+
+    showMentionMenu = false;
+    mentionFilter = '';
+    mentionStartIndex = -1;
+    mentionCurrentPath = '';
+    inputEl?.focus();
+  }
+
   async function handleKeydown(e: KeyboardEvent) {
+    // Handle slash menu navigation
+    if (showSlashMenu) {
+      const commands = filteredSlashCommands();
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        slashMenuIndex = Math.min(slashMenuIndex + 1, commands.length - 1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        slashMenuIndex = Math.max(slashMenuIndex - 1, 0);
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && commands.length > 0) {
+        e.preventDefault();
+        selectSlashCommand(commands[slashMenuIndex].name);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        showSlashMenu = false;
+        return;
+      }
+    }
+
+    // Handle mention menu navigation
+    if (showMentionMenu) {
+      const items = filteredMentionItems();
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        mentionMenuIndex = Math.min(mentionMenuIndex + 1, items.length - 1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        mentionMenuIndex = Math.max(mentionMenuIndex - 1, 0);
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && items.length > 0) {
+        e.preventDefault();
+        await selectMention(items[mentionMenuIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        showMentionMenu = false;
+        mentionCurrentPath = '';
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       await sendMessage();
@@ -111,10 +331,17 @@
     const content = inputValue.trim();
     const attachments = [...pendingAttachments.all];
 
-    if ((!content && attachments.length === 0) || uiState.isStreaming) return;
+    if ((!content && attachments.length === 0) || isStreaming) return;
+
+    // Ensure we have an active session, or create one
+    let sessionId = sessionStore.activeSessionId;
+    if (!sessionId) {
+      sessionId = sessionStore.createSession();
+      sessionStore.switchToSession(sessionId);
+    }
 
     // Add message with attachments for display
-    messages.add({ role: 'user', content, attachments: attachments.length > 0 ? attachments : undefined });
+    sessionStore.addMessage(sessionId, { role: 'user', content, attachments: attachments.length > 0 ? attachments : undefined });
     inputValue = '';
     pendingAttachments.clear();
 
@@ -126,21 +353,27 @@
       ? buildMessageContent(content, attachments)
       : content;
 
-    await queryClaudeReal(messageContent);
+    await queryClaudeReal(sessionId, messageContent);
   }
 
-  async function queryClaudeReal(prompt: string | ContentBlock[]) {
+  async function queryClaudeReal(sessionId: string, prompt: string | ContentBlock[]) {
     const logPrompt = typeof prompt === 'string' ? prompt.substring(0, 50) : '[content blocks]';
-    console.log('[queryClaudeReal] CALLED with prompt:', logPrompt);
-    uiState.isStreaming = true;
-    messages.add({ role: 'assistant', content: '', blocks: [] });
+    console.log('[queryClaudeReal] CALLED with prompt:', logPrompt, 'session:', sessionId);
+
+    // Set session to streaming
+    sessionStore.setStatus(sessionId, 'streaming');
+    sessionStore.addMessage(sessionId, { role: 'assistant', content: '', blocks: [] });
 
     const workingDir = appConfig.workspace?.path || '.';
-    const hasAttachments = typeof prompt !== 'string';
     const config: ClaudeQueryConfig = {
       permissionMode: appConfig.claude.permissionMode,
       maxTurns: appConfig.claude.maxTurns,
-      mcpServers: appConfig.claude.mcpServers
+      mcpServers: appConfig.claude.mcpServers,
+      // Skills configuration
+      enableSkills: appConfig.claude.skills.enabled,
+      settingSources: appConfig.claude.skills.enabled
+        ? appConfig.claude.skills.settingSources
+        : []
     };
 
     // Capture resume session ID and clear it
@@ -149,13 +382,15 @@
 
     try {
       let blockOrder = 0;
-      await queryClaudeStreaming(prompt, workingDir, (event: ClaudeStreamEvent) => {
-        console.log('[chat] RECEIVED event:', event.type, event);
+      // Note: The service layer (claude.ts) already filters events by queryId,
+      // so we don't need to filter here. Each callback only receives its own events.
+      const handle = await queryClaudeStreaming(prompt, workingDir, (event: ClaudeStreamEvent) => {
+        console.log('[chat] RECEIVED event:', event.type, 'for session:', sessionId);
 
         switch (event.type) {
           case 'text':
             if (event.content) {
-              messages.appendTextToLast(event.content, ++blockOrder);
+              sessionStore.appendTextToLast(sessionId, event.content, ++blockOrder);
               scrollToBottom();
             }
             break;
@@ -169,26 +404,55 @@
                 ? event.tool.input
                 : JSON.stringify(event.tool.input, null, 2);
 
-              // Add to toolActivity panel (kept for debugging)
-              const toolId = toolActivity.add({
-                tool: event.tool.name,
-                status: 'running',
-                input: toolInput,
-                toolUseId: event.tool.id
-              });
-              console.log('[chat] toolActivity.add returned id:', toolId);
-              pendingTools.set(toolKey, toolId);
+              // Check if this is a Task tool (subagent)
+              const isTaskTool = event.tool.name === 'Task';
+              let parentSubagentId: string | undefined;
 
-              // Add to current message for inline display
-              console.log('[chat] Calling messages.addToolToLast');
-              const messageToolId = messages.addToolToLast({
+              if (isTaskTool) {
+                // Parse Task input to get description and subagent_type
+                let description = '';
+                let subagentType = 'Task';
+                try {
+                  const parsed = typeof event.tool.input === 'string'
+                    ? JSON.parse(event.tool.input)
+                    : event.tool.input;
+                  description = parsed?.description || '';
+                  subagentType = parsed?.subagent_type || 'Task';
+                } catch {
+                  // Ignore parse errors
+                }
+
+                // Start a new subagent group
+                sessionStore.startSubagent(
+                  sessionId,
+                  event.tool.id || toolKey,
+                  description,
+                  subagentType
+                );
+              } else {
+                // Check if there's an active subagent for this session
+                const activeSubagent = sessionStore.getActiveSubagent(sessionId);
+                if (activeSubagent) {
+                  parentSubagentId = activeSubagent.id;
+                }
+              }
+
+              // Add pending tool mapping
+              const messageToolId = sessionStore.addToolToLast(sessionId, {
                 tool: event.tool.name,
                 status: 'running',
                 input: toolInput,
                 toolUseId: event.tool.id
-              }, true, ++blockOrder);
-              console.log('[chat] addToolToLast returned id:', messageToolId);
-              console.log('[chat] After addToolToLast, last message tools:', messages.all[messages.all.length - 1]?.tools);
+              }, true, ++blockOrder, parentSubagentId);
+
+              if (messageToolId) {
+                sessionStore.addPendingTool(sessionId, toolKey, messageToolId);
+
+                // Track child tool in subagent group
+                if (parentSubagentId) {
+                  sessionStore.addChildToolToSubagent(sessionId, parentSubagentId, messageToolId);
+                }
+              }
             } else {
               console.log('[chat] WARNING: event.tool is falsy!');
             }
@@ -198,51 +462,65 @@
             console.log('[chat] RECEIVED tool_result:', event);
             if (event.tool?.name) {
               const toolKey = event.tool.id || event.tool.name;
-              const toolId = pendingTools.get(toolKey);
+              const toolId = sessionStore.popPendingTool(sessionId, toolKey);
               console.log('[chat] Looking for pending tool:', event.tool.name, 'found id:', toolId);
-              if (toolId) {
-                toolActivity.complete(toolId, event.tool?.result);
-                pendingTools.delete(toolKey);
-              }
 
-              // Update tool in current message for inline display
-              const lastMessage = messages.all[messages.all.length - 1];
-              console.log('[chat] Last message tools:', lastMessage?.tools);
-              const toolToUpdate = lastMessage?.tools?.find(
-                t =>
-                  (event.tool?.id ? t.toolUseId === event.tool.id : t.tool === event.tool!.name) &&
-                  t.status === 'running'
-              );
-              console.log('[chat] Tool to update:', toolToUpdate);
-              if (toolToUpdate && lastMessage) {
-                messages.updateTool(lastMessage.id, toolToUpdate.id, {
-                  status: 'completed',
-                  output: event.tool.result,
-                  completedAt: new Date()
-                });
+              if (toolId) {
+                sessionStore.completeTool(sessionId, toolId, event.tool.result);
+
+                // If this is a Task tool completing, complete the subagent group
+                const session = sessionStore.sessions.get(sessionId);
+                const tool = session?.tools.find(t => t.id === toolId);
+                if (tool?.tool === 'Task') {
+                  sessionStore.completeSubagent(sessionId, event.tool.id || toolKey);
+                }
               }
             }
             break;
 
           case 'error':
             console.log('[chat] RECEIVED error:', event.error);
-            messages.updateLast(`Error: ${event.error}`);
+            sessionStore.updateLastMessage(sessionId, `Error: ${event.error}`);
+            sessionStore.setStatus(sessionId, 'error', event.error);
+            break;
+
+          case 'cancelled':
+            console.log('[chat] RECEIVED cancelled:', event.reason);
+            sessionStore.setStatus(sessionId, 'cancelled');
+            break;
+
+          case 'system_init':
+            console.log('[chat] RECEIVED system_init, slash commands:', event.slashCommands?.length);
+            if (event.slashCommands && event.slashCommands.length > 0) {
+              slashCommands.set(event.slashCommands);
+            }
             break;
 
           case 'done':
-            console.log('[chat] RECEIVED done, pending tools:', pendingTools.size);
-            // Mark any remaining pending tools as completed
-            for (const [, toolId] of pendingTools) {
-              toolActivity.complete(toolId);
+            console.log('[chat] RECEIVED done');
+            // Clear pending tools for this session
+            sessionStore.clearPendingTools(sessionId);
+            // Complete any remaining active subagent groups
+            const activeGroup = sessionStore.getActiveSubagent(sessionId);
+            if (activeGroup) {
+              sessionStore.completeSubagent(sessionId, activeGroup.taskToolId);
             }
-            pendingTools.clear();
-            uiState.isStreaming = false;
+            // Mark session as completed (unless it's already in error/cancelled state)
+            const currentSession = sessionStore.sessions.get(sessionId);
+            if (currentSession?.status === 'streaming') {
+              sessionStore.setStatus(sessionId, 'completed');
+              sendCompletionNotification();
+            }
             break;
         }
       }, config, currentResumeSession || undefined);
+
+      // Store the query handle for cancellation
+      sessionStore.setQueryHandle(sessionId, handle);
+
     } catch (error) {
-      messages.updateLast(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      uiState.isStreaming = false;
+      sessionStore.updateLastMessage(sessionId, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      sessionStore.setStatus(sessionId, 'error', error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
@@ -282,9 +560,8 @@
           name,
           lastOpened: new Date()
         });
-        // Clear current conversation when switching workspace
-        messages.clear();
-        toolActivity.clear();
+        // Clear all sessions when switching workspace
+        sessionStore.clearAll();
       }
     } catch (e) {
       console.error('Failed to select directory:', e);
@@ -292,16 +569,16 @@
   }
 
   function startNewThread() {
-    // Clear messages to start a new conversation
-    messages.clear();
-    toolActivity.clear();
+    // Create a new session and switch to it
+    const sessionId = sessionStore.createSession();
+    sessionStore.switchToSession(sessionId);
     pendingAttachments.clear();
     resumeSessionId = null;
   }
 
   // Attachment handlers
   async function handleAddAttachment() {
-    if (!pendingAttachments.canAdd || uiState.isStreaming) return;
+    if (!pendingAttachments.canAdd || isStreaming) return;
 
     const paths = await openFilePicker();
     if (!paths) return;
@@ -319,7 +596,7 @@
   }
 
   async function handlePaste(e: ClipboardEvent) {
-    if (!pendingAttachments.canAdd || uiState.isStreaming) return;
+    if (!pendingAttachments.canAdd || isStreaming) return;
 
     const attachment = await handlePasteImage(e);
     if (attachment) {
@@ -352,7 +629,7 @@
     e.preventDefault();
     isDragging = false;
 
-    if (!pendingAttachments.canAdd || uiState.isStreaming) return;
+    if (!pendingAttachments.canAdd || isStreaming) return;
     if (!e.dataTransfer?.files.length) return;
 
     const results = await handleDroppedFiles(e.dataTransfer.files);
@@ -372,15 +649,61 @@
 
   // Keyboard shortcuts
   function handleGlobalKeydown(e: KeyboardEvent) {
+    // Handle session picker navigation when open
+    if (showSessionPicker) {
+      const sessions = sessionStore.sessionList;
+      if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
+        e.preventDefault();
+        sessionPickerIndex = (sessionPickerIndex + 1) % sessions.length;
+        return;
+      }
+      if (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
+        e.preventDefault();
+        sessionPickerIndex = (sessionPickerIndex - 1 + sessions.length) % sessions.length;
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (sessions[sessionPickerIndex]) {
+          sessionStore.switchToSession(sessions[sessionPickerIndex].id);
+        }
+        showSessionPicker = false;
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        showSessionPicker = false;
+        return;
+      }
+    }
+
+    // ⌘ + T for session picker (switch between tabs)
+    if (e.metaKey && e.key === 't') {
+      e.preventDefault();
+      const sessions = sessionStore.sessionList;
+      if (sessions.length > 0) {
+        // Find current session index
+        const currentIdx = sessions.findIndex(s => s.id === sessionStore.activeSessionId);
+        sessionPickerIndex = currentIdx >= 0 ? currentIdx : 0;
+        showSessionPicker = true;
+      }
+    }
     // ⌘ + K for command palette (threads)
     if (e.metaKey && e.key === 'k') {
       e.preventDefault();
       showCommandPalette = true;
     }
-    // ⌘ + N for new thread
+    // ⌘ + N for new session
     if (e.metaKey && e.key === 'n') {
       e.preventDefault();
       startNewThread();
+    }
+    // ⌘ + W to close current session
+    if (e.metaKey && e.key === 'w') {
+      e.preventDefault();
+      if (currentSession) {
+        sessionStore.closeSession(currentSession.id);
+      }
     }
     // ⌘ + , for settings
     if (e.metaKey && e.key === ',') {
@@ -391,8 +714,7 @@
     if (e.metaKey && e.shiftKey && e.key === 'r') {
       e.preventDefault();
       appConfig.reset();
-      messages.clear();
-      toolActivity.clear();
+      sessionStore.clearAll();
       window.location.reload();
     }
   }
@@ -471,12 +793,15 @@
     </div>
   </header>
 
+  <!-- Session Tabs -->
+  <SessionTabs oncreate={startNewThread} />
+
   <div class="main">
     <!-- Chat column (messages + input) -->
     <div class="chat-column">
       <div class="messages-container" bind:this={messagesEl}>
         <div class="messages-inner">
-          {#if messages.count === 0}
+          {#if currentMessages.length === 0}
             <div class="empty-state" in:fade>
               {#if loadingSession}
                 <span class="spinner"></span>
@@ -493,7 +818,7 @@
             </div>
           {:else}
             <div class="messages-list">
-              {#each messages.all as message (message.id)}
+              {#each currentMessages as message (message.id)}
                 <div
                   class="message"
                   class:user={message.role === 'user'}
@@ -540,7 +865,21 @@
                             {@const toolId = (block as { toolId: string }).toolId}
                             {@const tool = message.tools?.find(t => t.id === toolId)}
                             {#if tool}
-                              <InlineTool {tool} />
+                              {#if tool.tool === 'Task'}
+                                <!-- Render Task tools as SubagentGroup -->
+                                {@const group = getGroupByTaskToolId(tool.toolUseId || tool.id)}
+                                {#if group}
+                                  {@const childTools = message.tools?.filter(t => t.parentSubagentId === group.id) || []}
+                                  <SubagentGroup {group} tools={childTools} />
+                                {:else}
+                                  <!-- No group found, render as regular tool -->
+                                  <InlineTool {tool} />
+                                {/if}
+                              {:else if !tool.parentSubagentId}
+                                <!-- Only render non-child tools at top level -->
+                                <InlineTool {tool} />
+                              {/if}
+                              <!-- Child tools are rendered inside SubagentGroup, skip them here -->
                             {:else}
                               <!-- Tool block exists but no matching tool found - render placeholder -->
                               <div class="tool-missing">Tool not found: {toolId}</div>
@@ -564,8 +903,18 @@
                         <!-- Fallback: render any tools that don't have blocks -->
                         {#if message.role === 'assistant' && message.tools?.length}
                           {#each message.tools as tool (tool.id)}
-                            {#if !hasToolBlock(message, tool.id)}
-                              <InlineTool {tool} />
+                            {#if !hasToolBlock(message, tool.id) && !tool.parentSubagentId}
+                              {#if tool.tool === 'Task'}
+                                {@const group = getGroupByTaskToolId(tool.toolUseId || tool.id)}
+                                {#if group}
+                                  {@const childTools = message.tools?.filter(t => t.parentSubagentId === group.id) || []}
+                                  <SubagentGroup {group} tools={childTools} />
+                                {:else}
+                                  <InlineTool {tool} />
+                                {/if}
+                              {:else}
+                                <InlineTool {tool} />
+                              {/if}
                             {/if}
                           {/each}
                         {/if}
@@ -574,12 +923,24 @@
                       {#if message.role === 'assistant' && message.tools?.length}
                         <div class="inline-tools">
                           {#each message.tools as tool (tool.id)}
-                            <InlineTool {tool} />
+                            {#if !tool.parentSubagentId}
+                              {#if tool.tool === 'Task'}
+                                {@const group = getGroupByTaskToolId(tool.toolUseId || tool.id)}
+                                {#if group}
+                                  {@const childTools = message.tools?.filter(t => t.parentSubagentId === group.id) || []}
+                                  <SubagentGroup {group} tools={childTools} />
+                                {:else}
+                                  <InlineTool {tool} />
+                                {/if}
+                              {:else}
+                                <InlineTool {tool} />
+                              {/if}
+                            {/if}
                           {/each}
                         </div>
                       {/if}
                       <div class="message-text">
-                        {#if message.role === 'assistant' && message.content === '' && uiState.isStreaming}
+                        {#if message.role === 'assistant' && message.content === '' && isStreaming}
                           <span class="typing-indicator">
                             <span class="dot"></span>
                             <span class="dot"></span>
@@ -639,7 +1000,7 @@
             <button
               class="attach-btn"
               onclick={handleAddAttachment}
-              disabled={!pendingAttachments.canAdd || uiState.isStreaming}
+              disabled={!pendingAttachments.canAdd || isStreaming}
               title="Attach files"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -652,16 +1013,16 @@
               placeholder="Message Claude..."
               rows="1"
               onkeydown={handleKeydown}
-              oninput={autoResize}
+              oninput={(e) => { autoResize(e); handleInput(); }}
               onpaste={handlePaste}
-              disabled={uiState.isStreaming}
+              disabled={isStreaming}
             ></textarea>
             <button
               class="send-btn"
-              disabled={(!inputValue.trim() && pendingAttachments.count === 0) || uiState.isStreaming}
+              disabled={(!inputValue.trim() && pendingAttachments.count === 0) || isStreaming}
               onclick={sendMessage}
             >
-              {#if uiState.isStreaming}
+              {#if isStreaming}
                 <span class="spinner"></span>
               {:else}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -670,8 +1031,80 @@
               {/if}
             </button>
           </div>
+
+          <!-- Slash command autocomplete menu -->
+          {#if showSlashMenu && filteredSlashCommands().length > 0}
+            <div class="slash-menu" transition:fly={{ y: 10, duration: 150 }}>
+              {#each filteredSlashCommands() as cmd, idx (cmd.name)}
+                <button
+                  class="slash-item"
+                  class:selected={idx === slashMenuIndex}
+                  onclick={() => selectSlashCommand(cmd.name)}
+                  type="button"
+                >
+                  <span class="slash-name">/{cmd.name}</span>
+                  {#if cmd.description}
+                    <span class="slash-desc">{cmd.description}</span>
+                  {/if}
+                  <span class="slash-source">{cmd.source}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- @ mention autocomplete menu -->
+          {#if showMentionMenu && filteredMentionItems().length > 0}
+            <div class="mention-menu" transition:fly={{ y: 10, duration: 150 }}>
+              {#if mentionCurrentPath}
+                <div class="mention-path">
+                  <span class="mention-path-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                    </svg>
+                  </span>
+                  <span>{mentionCurrentPath}/</span>
+                </div>
+              {/if}
+              {#each filteredMentionItems() as item, idx (item.type + ':' + item.value)}
+                <button
+                  class="mention-item"
+                  class:selected={idx === mentionMenuIndex}
+                  onclick={() => selectMention(item)}
+                  type="button"
+                >
+                  <span class="mention-icon">
+                    {#if item.type === 'skill'}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                      </svg>
+                    {:else if item.isDirectory}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                      </svg>
+                    {:else}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                      </svg>
+                    {/if}
+                  </span>
+                  <span class="mention-name">{item.displayName}</span>
+                  {#if item.type === 'skill'}
+                    <span class="mention-type">skill</span>
+                  {:else if item.isDirectory}
+                    <span class="mention-type">folder</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {:else if showMentionMenu && filteredMentionItems().length === 0}
+            <div class="mention-menu mention-empty" transition:fly={{ y: 10, duration: 150 }}>
+              <span class="mention-empty-text">No matches</span>
+            </div>
+          {/if}
+
           <p class="input-hint">
-            <kbd>↵</kbd> send · <kbd>⇧↵</kbd> new line
+            <kbd>↵</kbd> send · <kbd>⇧↵</kbd> new line{#if slashCommands.count > 0} · <kbd>/</kbd> commands{/if} · <kbd>@</kbd> files
           </p>
         </div>
       </div>
@@ -699,18 +1132,65 @@
 {#if showCommandPalette}
   <CommandPalette
     onclose={() => showCommandPalette = false}
-    onselect={async (sessionId) => {
+    onselect={async (claudeSessionId) => {
       showCommandPalette = false;
-      // Set up session resumption
-      messages.clear();
-      toolActivity.clear();
-      resumeSessionId = sessionId;
-      // Load session history
-      await loadSessionHistory(sessionId);
+      // Set the resume session ID for the next query
+      resumeSessionId = claudeSessionId;
+      // Load session history (creates a new session and switches to it)
+      await loadSessionHistory(claudeSessionId);
       // Focus input so user can type next message
       setTimeout(() => inputEl?.focus(), 50);
     }}
   />
+{/if}
+
+{#if showSessionPicker && sessionStore.sessionList.length > 0}
+  <div
+    class="session-picker-overlay"
+    onclick={() => showSessionPicker = false}
+    onkeydown={(e) => e.key === 'Escape' && (showSessionPicker = false)}
+    role="dialog"
+    aria-modal="true"
+    aria-label="Switch session"
+    tabindex="-1"
+    in:fade={{ duration: 100 }}
+    out:fade={{ duration: 75 }}
+  >
+    <div class="session-picker" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="listbox" tabindex="-1" in:fly={{ y: -10, duration: 150 }}>
+      <div class="session-picker-header">
+        <span>Switch Session</span>
+        <kbd>⌘T</kbd>
+      </div>
+      <div class="session-picker-list">
+        {#each sessionStore.sessionList as session, idx (session.id)}
+          <button
+            class="session-picker-item"
+            class:selected={idx === sessionPickerIndex}
+            class:active={session.id === sessionStore.activeSessionId}
+            onclick={() => {
+              sessionStore.switchToSession(session.id);
+              showSessionPicker = false;
+            }}
+          >
+            <span class="session-picker-title">{session.title}</span>
+            {#if session.status === 'streaming'}
+              <span class="session-picker-status streaming"></span>
+            {:else if session.status === 'error'}
+              <span class="session-picker-status error">!</span>
+            {/if}
+            {#if session.id === sessionStore.activeSessionId}
+              <span class="session-picker-current">current</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+      <div class="session-picker-hint">
+        <span><kbd>↑↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> select</span>
+        <span><kbd>esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if lightboxImage}
@@ -730,12 +1210,18 @@
         <path d="M18 6L6 18M6 6l12 12"/>
       </svg>
     </button>
-    <img
-      src={lightboxImage.src}
-      alt={lightboxImage.alt}
-      class="lightbox-image"
+    <button
+      type="button"
+      class="lightbox-image-wrapper"
       onclick={(e) => e.stopPropagation()}
-    />
+      onkeydown={(e) => e.key === 'Escape' && (lightboxImage = null)}
+    >
+      <img
+        src={lightboxImage.src}
+        alt={lightboxImage.alt}
+        class="lightbox-image"
+      />
+    </button>
   </div>
 {/if}
 
@@ -907,18 +1393,10 @@
     background: var(--gray-100);
   }
 
-  .icon-btn.active {
-    background: var(--off-black);
-  }
-
   .icon-btn svg {
     width: 16px;
     height: 16px;
     color: var(--gray-500);
-  }
-
-  .icon-btn.active svg {
-    color: var(--white);
   }
 
   /* Main area */
@@ -1043,27 +1521,6 @@
     background: var(--gray-100);
     padding: 0.625rem 0.875rem;
     border-radius: 14px 14px 4px 14px;
-  }
-
-  .message-image {
-    max-width: 100%;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
-  .message-image img {
-    max-width: 100%;
-    max-height: 400px;
-    object-fit: contain;
-    display: block;
-    border-radius: 8px;
-    border: 1px solid var(--gray-200);
-  }
-
-  .message.user .message-image {
-    background: var(--gray-100);
-    padding: 0.5rem;
-    border-radius: 14px;
   }
 
   .message-time {
@@ -1232,6 +1689,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    align-self: center;
     background: transparent;
     border: none;
     border-radius: 10px;
@@ -1476,10 +1934,354 @@
     color: white;
   }
 
+  .lightbox-image-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: default;
+  }
+
   .lightbox-image {
     max-width: 90vw;
     max-height: 90vh;
     object-fit: contain;
     border-radius: 4px;
+  }
+
+  /* Slash command autocomplete menu */
+  .slash-menu {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    margin-bottom: 8px;
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 100;
+  }
+
+  .slash-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .slash-item:hover,
+  .slash-item.selected {
+    background: var(--gray-100);
+  }
+
+  .slash-item:first-child {
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+
+  .slash-item:last-child {
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+  }
+
+  .slash-item:only-child {
+    border-radius: var(--radius-md);
+  }
+
+  .slash-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--off-black);
+  }
+
+  .slash-desc {
+    flex: 1;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--gray-500);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .slash-source {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gray-400);
+    text-transform: uppercase;
+    padding: 2px 6px;
+    background: var(--gray-100);
+    border-radius: 4px;
+  }
+
+  .input-inner {
+    position: relative;
+  }
+
+  /* @ mention autocomplete menu */
+  .mention-menu {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    margin-bottom: 8px;
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    max-height: 240px;
+    overflow-y: auto;
+    z-index: 100;
+  }
+
+  .mention-path {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.5rem 0.875rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--gray-500);
+    border-bottom: 1px solid var(--gray-100);
+    background: var(--gray-50);
+  }
+
+  .mention-path-icon {
+    display: flex;
+    align-items: center;
+  }
+
+  .mention-path-icon svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  .mention-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.875rem;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .mention-item:hover,
+  .mention-item.selected {
+    background: var(--gray-100);
+  }
+
+  .mention-item:first-child:not(:only-child) {
+    border-radius: 0;
+  }
+
+  .mention-item:last-child {
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+  }
+
+  .mention-item:only-child {
+    border-radius: var(--radius-md);
+  }
+
+  .mention-path + .mention-item:first-of-type {
+    border-radius: 0;
+  }
+
+  .mention-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+  }
+
+  .mention-icon svg {
+    width: 14px;
+    height: 14px;
+    color: var(--gray-400);
+  }
+
+  .mention-item.selected .mention-icon svg,
+  .mention-item:hover .mention-icon svg {
+    color: var(--gray-600);
+  }
+
+  .mention-name {
+    flex: 1;
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    color: var(--off-black);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mention-type {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gray-400);
+    text-transform: uppercase;
+    padding: 2px 6px;
+    background: var(--gray-100);
+    border-radius: 4px;
+  }
+
+  .mention-empty {
+    padding: 0.75rem 0.875rem;
+  }
+
+  .mention-empty-text {
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    color: var(--gray-400);
+  }
+
+  /* Session picker */
+  .session-picker-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 15vh;
+    z-index: 1000;
+  }
+
+  .session-picker {
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+    min-width: 320px;
+    max-width: 400px;
+    overflow: hidden;
+  }
+
+  .session-picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--gray-100);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--gray-500);
+  }
+
+  .session-picker-header kbd {
+    padding: 2px 6px;
+    background: var(--gray-100);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--gray-400);
+  }
+
+  .session-picker-list {
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .session-picker-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .session-picker-item:hover,
+  .session-picker-item.selected {
+    background: var(--gray-100);
+  }
+
+  .session-picker-item.active {
+    background: var(--gray-50);
+  }
+
+  .session-picker-title {
+    flex: 1;
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    color: var(--off-black);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .session-picker-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .session-picker-status.streaming {
+    background: var(--blue-500);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  .session-picker-status.error {
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--red-100);
+    color: var(--red-600);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .session-picker-current {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gray-400);
+    text-transform: uppercase;
+    padding: 2px 6px;
+    background: var(--gray-100);
+    border-radius: 4px;
+  }
+
+  .session-picker-hint {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--gray-100);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    color: var(--gray-400);
+  }
+
+  .session-picker-hint kbd {
+    padding: 1px 4px;
+    background: var(--gray-100);
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
   }
 </style>

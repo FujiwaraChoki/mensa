@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fly, fade } from 'svelte/transition';
-  import { appConfig } from '$lib/stores/app.svelte';
-  import type { MCPServerConfig, PermissionMode } from '$lib/types';
+  import { appConfig, slashCommands } from '$lib/stores/app.svelte';
+  import type { MCPServerConfig, PermissionMode, SettingSource } from '$lib/types';
 
   interface Props {
     onclose: () => void;
@@ -9,7 +9,7 @@
 
   let { onclose }: Props = $props();
 
-  let activeTab = $state<'general' | 'mcp'>('general');
+  let activeTab = $state<'general' | 'skills' | 'mcp'>('general');
   let editingServer = $state<MCPServerConfig | null>(null);
   let showAddServer = $state(false);
 
@@ -85,6 +85,13 @@
       </button>
       <button
         class="tab"
+        class:active={activeTab === 'skills'}
+        onclick={() => activeTab = 'skills'}
+      >
+        Skills
+      </button>
+      <button
+        class="tab"
         class:active={activeTab === 'mcp'}
         onclick={() => activeTab = 'mcp'}
       >
@@ -118,6 +125,91 @@
             onchange={(e) => appConfig.setMaxTurns(parseInt(e.currentTarget.value) || 25)}
           />
         </div>
+      {:else if activeTab === 'skills'}
+        <div class="section">
+          <h3>Skills & Commands</h3>
+          <p class="hint">Enable Claude Code skills and slash commands from your config</p>
+
+          <div class="toggle-row">
+            <div class="toggle-label">
+              <span>Enable Skills</span>
+              <span class="toggle-hint">Load skills from ~/.claude/skills/</span>
+            </div>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                checked={appConfig.claude.skills.enabled}
+                onchange={(e) => appConfig.setSkillsEnabled(e.currentTarget.checked)}
+              />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        {#if appConfig.claude.skills.enabled}
+          <div class="section">
+            <h3>Setting Sources</h3>
+            <p class="hint">Which locations to load skills and commands from</p>
+
+            <div class="checkbox-group">
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={appConfig.claude.skills.settingSources.includes('user')}
+                  onchange={(e) => {
+                    const current = appConfig.claude.skills.settingSources;
+                    if (e.currentTarget.checked) {
+                      appConfig.setSkillsSettingSources([...current.filter(s => s !== 'user'), 'user']);
+                    } else {
+                      appConfig.setSkillsSettingSources(current.filter(s => s !== 'user'));
+                    }
+                  }}
+                />
+                <span class="checkbox-text">
+                  <span class="checkbox-label">User</span>
+                  <span class="checkbox-hint">~/.claude/skills/ and ~/.claude/commands/</span>
+                </span>
+              </label>
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={appConfig.claude.skills.settingSources.includes('project')}
+                  onchange={(e) => {
+                    const current = appConfig.claude.skills.settingSources;
+                    if (e.currentTarget.checked) {
+                      appConfig.setSkillsSettingSources([...current.filter(s => s !== 'project'), 'project']);
+                    } else {
+                      appConfig.setSkillsSettingSources(current.filter(s => s !== 'project'));
+                    }
+                  }}
+                />
+                <span class="checkbox-text">
+                  <span class="checkbox-label">Project</span>
+                  <span class="checkbox-hint">.claude/skills/ and .claude/commands/ in workspace</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          {#if slashCommands.count > 0}
+            <div class="section">
+              <h3>Available Slash Commands</h3>
+              <p class="hint">Commands loaded from your config (type / in chat)</p>
+
+              <div class="commands-list">
+                {#each slashCommands.all as cmd (cmd.name)}
+                  <div class="command-item">
+                    <span class="command-name">/{cmd.name}</span>
+                    {#if cmd.description}
+                      <span class="command-desc">{cmd.description}</span>
+                    {/if}
+                    <span class="command-source">{cmd.source}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {/if}
       {:else}
         <div class="section">
           <div class="section-header">
@@ -608,5 +700,121 @@
 
   .save-btn:hover {
     opacity: 0.85;
+  }
+
+  /* Skills tab styles */
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 0;
+  }
+
+  .toggle-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .toggle-label span:first-child {
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--off-black);
+  }
+
+  .toggle-hint {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--gray-500);
+  }
+
+  .checkbox-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.625rem 0.875rem;
+    background: var(--gray-50);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .checkbox-row:hover {
+    background: var(--gray-100);
+  }
+
+  .checkbox-row input[type="checkbox"] {
+    margin-top: 2px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+
+  .checkbox-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .checkbox-label {
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--off-black);
+  }
+
+  .checkbox-hint {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--gray-500);
+  }
+
+  .commands-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .command-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--gray-50);
+    border-radius: var(--radius-md);
+  }
+
+  .command-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--off-black);
+  }
+
+  .command-desc {
+    flex: 1;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--gray-500);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .command-source {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gray-400);
+    text-transform: uppercase;
+    padding: 2px 6px;
+    background: var(--gray-200);
+    border-radius: 4px;
   }
 </style>

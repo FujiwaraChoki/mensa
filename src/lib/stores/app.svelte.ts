@@ -1,12 +1,16 @@
 // mensa - App State Management (Svelte 5 Runes)
 
 import { browser } from '$app/environment';
-import type { AppState, AppConfig, Message, ToolExecution, WorkspaceConfig, ClaudeConfig, MCPServerConfig, PermissionMode, Attachment, MessageBlock } from '$lib/types';
+import type { AppState, AppConfig, Message, ToolExecution, WorkspaceConfig, ClaudeConfig, MCPServerConfig, PermissionMode, Attachment, MessageBlock, SubagentGroup, SettingSource, SlashCommand } from '$lib/types';
 
 const DEFAULT_CLAUDE_CONFIG: ClaudeConfig = {
   permissionMode: 'acceptEdits',
   maxTurns: 25,
-  mcpServers: []
+  mcpServers: [],
+  skills: {
+    enabled: true,
+    settingSources: ['user', 'project']
+  }
 };
 
 // App configuration persisted to localStorage
@@ -95,6 +99,17 @@ function createAppConfig() {
       save();
     },
 
+    // Skills config methods
+    setSkillsEnabled(enabled: boolean) {
+      claude = { ...claude, skills: { ...claude.skills, enabled } };
+      save();
+    },
+
+    setSkillsSettingSources(sources: SettingSource[]) {
+      claude = { ...claude, skills: { ...claude.skills, settingSources: sources } };
+      save();
+    },
+
     reset() {
       onboardingCompleted = false;
       workspace = undefined;
@@ -170,15 +185,16 @@ function createMessages() {
       }];
     },
 
-    addToolToLast(tool: Omit<ToolExecution, 'id' | 'startedAt'>, addBlock = true, order?: number) {
-      console.log('[messages] addToolToLast called:', tool.tool, 'addBlock:', addBlock, 'order:', order);
+    addToolToLast(tool: Omit<ToolExecution, 'id' | 'startedAt'>, addBlock = true, order?: number, parentSubagentId?: string) {
+      console.log('[messages] addToolToLast called:', tool.tool, 'addBlock:', addBlock, 'order:', order, 'parentSubagentId:', parentSubagentId);
       if (messages.length > 0) {
         const last = messages[messages.length - 1];
         console.log('[messages] Last message:', last.id, 'current tools:', last.tools?.length ?? 0, 'current blocks:', last.blocks?.length ?? 0);
         const newTool: ToolExecution = {
           ...tool,
           id: crypto.randomUUID(),
-          startedAt: new Date()
+          startedAt: new Date(),
+          parentSubagentId
         };
         const blocks: MessageBlock[] = last.blocks ? [...last.blocks] : [];
         if (addBlock) {
@@ -338,6 +354,97 @@ function createPendingAttachments() {
   };
 }
 
+// Subagent groups for collapsible tool display
+function createSubagentGroups() {
+  let groups = $state<SubagentGroup[]>([]);
+  let activeSubagentId = $state<string | null>(null);
+
+  return {
+    get all() { return groups; },
+    get active() { return activeSubagentId; },
+
+    startSubagent(taskToolId: string, description: string, subagentType: string): string {
+      const id = crypto.randomUUID();
+      const group: SubagentGroup = {
+        id,
+        taskToolId,
+        description,
+        subagentType,
+        status: 'running',
+        childToolIds: [],
+        startedAt: new Date()
+      };
+      groups = [...groups, group];
+      activeSubagentId = id;
+      console.log('[subagentGroups] Started subagent:', id, description, subagentType);
+      return id;
+    },
+
+    addChildTool(toolId: string): void {
+      if (!activeSubagentId) return;
+      groups = groups.map(g =>
+        g.id === activeSubagentId
+          ? { ...g, childToolIds: [...g.childToolIds, toolId] }
+          : g
+      );
+      console.log('[subagentGroups] Added child tool:', toolId, 'to subagent:', activeSubagentId);
+    },
+
+    completeSubagent(taskToolId: string, status: 'completed' | 'error' = 'completed'): void {
+      groups = groups.map(g =>
+        g.taskToolId === taskToolId
+          ? { ...g, status, completedAt: new Date() }
+          : g
+      );
+      // Clear active if this was the active subagent
+      const completedGroup = groups.find(g => g.taskToolId === taskToolId);
+      if (completedGroup && activeSubagentId === completedGroup.id) {
+        activeSubagentId = null;
+      }
+      console.log('[subagentGroups] Completed subagent for task:', taskToolId);
+    },
+
+    getGroup(id: string): SubagentGroup | undefined {
+      return groups.find(g => g.id === id);
+    },
+
+    getGroupByTaskToolId(taskToolId: string): SubagentGroup | undefined {
+      return groups.find(g => g.taskToolId === taskToolId);
+    },
+
+    clear() {
+      groups = [];
+      activeSubagentId = null;
+    }
+  };
+}
+
+// Slash commands available from skills
+function createSlashCommands() {
+  let commands = $state<SlashCommand[]>([]);
+
+  return {
+    get all() { return commands; },
+    get count() { return commands.length; },
+
+    set(newCommands: SlashCommand[]) {
+      commands = newCommands;
+      console.log('[slashCommands] Set', commands.length, 'commands');
+    },
+
+    add(command: SlashCommand) {
+      // Avoid duplicates
+      if (!commands.some(c => c.name === command.name)) {
+        commands = [...commands, command];
+      }
+    },
+
+    clear() {
+      commands = [];
+    }
+  };
+}
+
 // Export singleton instances
 export const appConfig = createAppConfig();
 export const appState = createAppState();
@@ -345,3 +452,5 @@ export const messages = createMessages();
 export const toolActivity = createToolActivity();
 export const uiState = createUIState();
 export const pendingAttachments = createPendingAttachments();
+export const subagentGroups = createSubagentGroups();
+export const slashCommands = createSlashCommands();

@@ -3,10 +3,11 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ContentBlock } from '$lib/types';
+import type { ContentBlock, SettingSource, SlashCommand } from '$lib/types';
 
 export interface ClaudeStreamEvent {
-  type: 'text' | 'tool_use' | 'tool_result' | 'error' | 'done';
+  type: 'text' | 'tool_use' | 'tool_result' | 'error' | 'done' | 'system_init' | 'cancelled';
+  queryId?: string;
   content?: string;
   tool?: {
     id?: string;
@@ -15,9 +16,29 @@ export interface ClaudeStreamEvent {
     result?: string;
   };
   error?: string;
+  slashCommands?: SlashCommand[];
+  reason?: string;  // For cancelled events
 }
 
 export type StreamCallback = (event: ClaudeStreamEvent) => void;
+
+// Stream payload from backend with query_id
+interface StreamPayload {
+  query_id: string;
+  data: string;
+}
+
+// Done payload from backend
+interface DonePayload {
+  query_id: string;
+  code: number;
+}
+
+// Return type for streaming query
+export interface QueryHandle {
+  queryId: string;
+  cancel: () => Promise<void>;
+}
 
 interface ClaudeContentBlock {
   type: string;
@@ -64,10 +85,14 @@ export interface ClaudeQueryConfig {
     url?: string;
     headers?: Record<string, string>;
   }>;
+  // Skills configuration
+  settingSources?: SettingSource[];
+  enableSkills?: boolean;
 }
 
 /**
  * Send a message to Claude CLI and stream the response
+ * Returns a handle with the queryId and a cancel function
  */
 export async function queryClaudeStreaming(
   prompt: string | ContentBlock[],
@@ -75,7 +100,7 @@ export async function queryClaudeStreaming(
   onEvent: StreamCallback,
   config?: ClaudeQueryConfig,
   resumeSession?: string
-): Promise<void> {
+): Promise<QueryHandle> {
   const hasAttachments = typeof prompt !== 'string';
   const promptStr = hasAttachments ? JSON.stringify(prompt) : prompt;
   const logPrompt = hasAttachments ? '[content blocks]' : prompt.substring(0, 50);
@@ -83,83 +108,167 @@ export async function queryClaudeStreaming(
 
   let unlistenStream: UnlistenFn | null = null;
   let unlistenDone: UnlistenFn | null = null;
-
   let unlistenStderr: UnlistenFn | null = null;
-  let stderrOutput = '';
+
+  // Per-session tool tracking (no longer global)
+  const sessionToolUseIdToName = new Map<string, string>();
+  const stderrByQuery = new Map<string, string>();
+
+  // Will be set after invoke returns
+  let resolvedQueryId = '';
+
+  // Helper to wrap events with queryId
+  const emitEvent = (event: ClaudeStreamEvent) => {
+    onEvent({ ...event, queryId: resolvedQueryId });
+  };
+
+  // Helper to handle messages with session-scoped tool tracking
+  const handleMessage = (msg: ClaudeJsonMessage) => {
+    handleClaudeMessage(msg, emitEvent, sessionToolUseIdToName);
+  };
 
   try {
     // Listen for streaming data
-    unlistenStream = await listen<string>('claude-stream', (event) => {
-      const line = event.payload;
-      console.log('[claude-stream] RAW LINE:', line);
-      if (!line.trim()) return;
+    unlistenStream = await listen<StreamPayload>('claude-stream', (event) => {
+      const { query_id, data } = event.payload;
+
+      // Only process events for this query
+      if (resolvedQueryId && query_id !== resolvedQueryId) return;
+
+      console.log('[claude-stream] RAW LINE for query', query_id, ':', data);
+      if (!data.trim()) return;
 
       try {
-        const msg = JSON.parse(line) as ClaudeJsonMessage;
+        const msg = JSON.parse(data) as ClaudeJsonMessage;
         console.log('[claude-stream] PARSED JSON:', msg.type);
-        handleClaudeMessage(msg, onEvent);
+        handleMessage(msg);
       } catch (e) {
         // Plain text output
-        console.log('[claude-stream] JSON PARSE FAILED:', e, 'line:', line.substring(0, 100));
-        if (line.trim()) {
-          onEvent({ type: 'text', content: line + '\n' });
+        console.log('[claude-stream] JSON PARSE FAILED:', e, 'line:', data.substring(0, 100));
+        if (data.trim()) {
+          emitEvent({ type: 'text', content: data + '\n' });
         }
       }
     });
 
     // Listen for stderr (error messages)
-    unlistenStderr = await listen<string>('claude-stderr', (event) => {
-      stderrOutput += event.payload + '\n';
-      console.error('[claude stderr]', event.payload);
+    unlistenStderr = await listen<StreamPayload>('claude-stderr', (event) => {
+      const { query_id, data } = event.payload;
+      if (resolvedQueryId && query_id !== resolvedQueryId) return;
+
+      const current = stderrByQuery.get(query_id) || '';
+      stderrByQuery.set(query_id, current + data + '\n');
+      console.error('[claude stderr]', query_id, data);
     });
 
     // Listen for completion
-    unlistenDone = await listen<number>('claude-done', (event) => {
-      const code = event.payload;
+    unlistenDone = await listen<DonePayload>('claude-done', (event) => {
+      const { query_id, code } = event.payload;
+
+      // Only process events for this query
+      if (resolvedQueryId && query_id !== resolvedQueryId) return;
+
       if (code !== 0) {
         // Filter out debug messages (lines starting with [claude-query])
+        const stderrOutput = stderrByQuery.get(query_id) || '';
         const errorLines = stderrOutput
           .split('\n')
           .filter(line => !line.startsWith('[claude-query]'))
           .join('\n')
           .trim();
         const errorMsg = errorLines || `Claude exited with code ${code}`;
-        onEvent({ type: 'error', error: errorMsg });
+        emitEvent({ type: 'error', error: errorMsg });
       }
-      onEvent({ type: 'done' });
+      emitEvent({ type: 'done' });
 
       // Cleanup listeners
       unlistenStream?.();
       unlistenStderr?.();
       unlistenDone?.();
+
+      // Clean up session data
+      stderrByQuery.delete(query_id);
     });
 
-    // Start the Claude query
+    // Start the Claude query - now returns the query ID
     console.log('[claude] Starting invoke query_claude...');
-    await invoke('query_claude', {
+    resolvedQueryId = await invoke<string>('query_claude', {
       prompt: promptStr,
       workingDir: workingDirectory,
       config: config ? JSON.stringify(config) : null,
       resumeSession: resumeSession || null,
       hasAttachments: hasAttachments || null
     });
-    console.log('[claude] invoke query_claude completed');
+    console.log('[claude] invoke query_claude returned queryId:', resolvedQueryId);
+
+    // Return handle with cancel function
+    return {
+      queryId: resolvedQueryId,
+      cancel: async () => {
+        console.log('[claude] Cancelling query:', resolvedQueryId);
+        try {
+          await invoke('cancel_query', { queryId: resolvedQueryId });
+          emitEvent({ type: 'cancelled', reason: 'user_cancelled' });
+          emitEvent({ type: 'done' });
+        } catch (e) {
+          console.error('[claude] Failed to cancel query:', e);
+        }
+
+        // Cleanup listeners
+        unlistenStream?.();
+        unlistenStderr?.();
+        unlistenDone?.();
+      }
+    };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    onEvent({ type: 'error', error: errorMsg });
-    onEvent({ type: 'done' });
+    onEvent({ type: 'error', error: errorMsg, queryId: resolvedQueryId || undefined });
+    onEvent({ type: 'done', queryId: resolvedQueryId || undefined });
 
     // Cleanup listeners on error
     unlistenStream?.();
     unlistenStderr?.();
     unlistenDone?.();
+
+    // Return a no-op handle
+    return {
+      queryId: resolvedQueryId || '',
+      cancel: async () => {}
+    };
   }
 }
 
-// Track tool_use IDs to tool names for matching results
-const toolUseIdToName = new Map<string, string>();
+// Extract slash commands from system init data
+function extractSlashCommands(data: Record<string, unknown>): SlashCommand[] {
+  const commands: SlashCommand[] = [];
 
-function handleClaudeMessage(msg: ClaudeJsonMessage, onEvent: StreamCallback): void {
+  // The SDK may include slash_commands in the init data
+  const slashCmds = data.slash_commands as Array<{
+    name?: string;
+    description?: string;
+    source?: string;
+  }> | undefined;
+
+  if (Array.isArray(slashCmds)) {
+    for (const cmd of slashCmds) {
+      if (cmd.name) {
+        commands.push({
+          name: cmd.name,
+          description: cmd.description,
+          source: (cmd.source === 'project' ? 'project' : 'user') as SettingSource
+        });
+      }
+    }
+  }
+
+  return commands;
+}
+
+function handleClaudeMessage(
+  msg: ClaudeJsonMessage,
+  onEvent: StreamCallback,
+  toolUseIdToName: Map<string, string>
+): void {
   // Debug: log all messages from Claude
   console.log('[claude] RAW MESSAGE:', msg.type, msg);
 
@@ -307,7 +416,15 @@ function handleClaudeMessage(msg: ClaudeJsonMessage, onEvent: StreamCallback): v
 
   // Handle system messages
   if (msg.type === 'system') {
-    console.log('[claude] System message (ignored):', msg.subtype || 'unknown');
+    console.log('[claude] System message:', msg.subtype || 'unknown');
+    // Handle system init to extract slash commands
+    if (msg.subtype === 'init' && msg.data) {
+      const slashCommands = extractSlashCommands(msg.data);
+      if (slashCommands.length > 0) {
+        console.log('[claude] Found', slashCommands.length, 'slash commands');
+        onEvent({ type: 'system_init', slashCommands });
+      }
+    }
     return;
   }
 

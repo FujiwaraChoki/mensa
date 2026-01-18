@@ -4,7 +4,7 @@
   import { toolActivity } from '$lib/stores/app.svelte';
   import type { ToolName } from '$lib/types';
 
-  const toolIcons: Record<ToolName, string> = {
+  const toolIcons: Partial<Record<ToolName, string>> = {
     Read: '◇',
     Write: '◆',
     Edit: '✎',
@@ -14,7 +14,8 @@
     WebSearch: '◉',
     WebFetch: '↗',
     Task: '⟡',
-    TodoWrite: '☐'
+    TodoWrite: '☐',
+    Skill: '★'
   };
 
   function formatTime(date: Date): string {

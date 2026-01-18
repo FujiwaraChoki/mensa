@@ -1,13 +1,84 @@
 // mensa - Tauri backend
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tauri::Emitter;
+use std::sync::Arc;
+use tauri::{Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
+
+/// Active query tracking for cancellation support
+pub struct ActiveQuery {
+    pub child: tokio::process::Child,
+    pub started_at: std::time::Instant,
+}
+
+/// Application state for managing concurrent queries
+#[derive(Default)]
+pub struct AppState {
+    pub active_queries: Arc<Mutex<HashMap<String, ActiveQuery>>>,
+}
+
+/// Payload wrapper for stream events with query ID
+#[derive(Clone, Serialize)]
+struct StreamPayload {
+    query_id: String,
+    data: String,
+}
+
+/// Find the node binary in common macOS installation locations.
+/// When launched from Finder/Launchpad, macOS apps don't inherit shell PATH,
+/// so we need to check common locations directly.
+fn find_node_binary() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    // Common node installation paths on macOS
+    let common_paths = [
+        // Homebrew Apple Silicon
+        "/opt/homebrew/bin/node",
+        // Homebrew Intel
+        "/usr/local/bin/node",
+        // System
+        "/usr/bin/node",
+    ];
+
+    // Check common paths first
+    for path in &common_paths {
+        if Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+
+    // Check nvm installations (common versions)
+    if !home.is_empty() {
+        let nvm_base = PathBuf::from(&home).join(".nvm/versions/node");
+        if nvm_base.exists() {
+            // Try to find any installed node version
+            if let Ok(entries) = std::fs::read_dir(&nvm_base) {
+                let mut versions: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_dir())
+                    .collect();
+                // Sort by name descending to get latest version first
+                versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                for entry in versions {
+                    let node_path = entry.path().join("bin/node");
+                    if node_path.exists() {
+                        return node_path.to_string_lossy().to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to PATH-based resolution
+    "node".to_string()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,12 +444,16 @@ async fn load_session_messages(
 #[tauri::command]
 async fn query_claude(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     prompt: String,
     working_dir: String,
     config: Option<String>,
     resume_session: Option<String>,
     has_attachments: Option<bool>,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    // Generate unique query ID
+    let query_id = Uuid::new_v4().to_string();
+
     // Validate working directory exists
     let path = Path::new(&working_dir);
     if !path.exists() {
@@ -390,22 +465,34 @@ async fn query_claude(
 
     // Use Node.js script with Claude Agent SDK
     // Try multiple locations for the script
-    let possible_paths = [
-        std::env::current_dir().ok().map(|p| p.join("scripts/claude-query.mjs")),
-        std::env::current_exe().ok().and_then(|p| {
-            p.parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|p| p.join("scripts/claude-query.mjs"))
-        }),
-        Some(std::path::PathBuf::from("/Users/choki/Developer/playground/mensa/scripts/claude-query.mjs")),
-    ];
+    let mut possible_paths: Vec<PathBuf> = vec![];
+
+    // 1. Tauri resource directory (for bundled app)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        // Tauri v2 puts "../scripts" into "_up_/scripts" to preserve relative paths
+        possible_paths.push(resource_dir.join("_up_/scripts/claude-query.mjs"));
+        possible_paths.push(resource_dir.join("scripts/claude-query.mjs"));
+    }
+
+    // 2. Relative to executable (for development/bundled)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            // macOS .app bundle structure: Contents/MacOS/binary -> Contents/Resources
+            // Tauri v2 puts "../scripts" into "_up_/scripts"
+            possible_paths.push(parent.join("../Resources/_up_/scripts/claude-query.mjs"));
+            possible_paths.push(parent.join("../Resources/scripts/claude-query.mjs"));
+        }
+    }
+
+    // 3. Current working directory (for development)
+    if let Ok(cwd) = std::env::current_dir() {
+        possible_paths.push(cwd.join("scripts/claude-query.mjs"));
+    }
 
     let script = possible_paths
         .into_iter()
-        .flatten()
         .find(|p| p.exists())
-        .ok_or_else(|| "Could not find claude-query.mjs script".to_string())?;
+        .ok_or_else(|| "Could not find claude-query.mjs script. Please ensure the app is installed correctly.".to_string())?;
 
     let mut args = vec![
         script.to_string_lossy().to_string(),
@@ -413,6 +500,8 @@ async fn query_claude(
         working_dir.clone(),
         "--prompt".to_string(),
         prompt,
+        "--query-id".to_string(),
+        query_id.clone(),
     ];
 
     if let Some(config_json) = config {
@@ -429,43 +518,131 @@ async fn query_claude(
         args.push("--has-attachments".to_string());
     }
 
-    let mut child = Command::new("node")
+    let node_binary = find_node_binary();
+    let mut child = Command::new(&node_binary)
         .args(&args)
         .current_dir(&working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn claude: {}. Make sure Claude CLI is installed.", e))?;
+        .map_err(|e| format!("Failed to spawn node at '{}': {}. Make sure Node.js is installed.", node_binary, e))?;
+
+    // Store the child process for potential cancellation
+    let query_id_for_storage = query_id.clone();
+    let active_queries = state.active_queries.clone();
 
     // Read stderr in background for error messages
     let stderr = child.stderr.take();
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+
+    // Store child in active queries (we need to move child ownership)
+    {
+        let mut queries = active_queries.lock().await;
+        queries.insert(query_id_for_storage.clone(), ActiveQuery {
+            child,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
     let app_clone = app.clone();
+    let query_id_for_stderr = query_id.clone();
     if let Some(stderr) = stderr {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 if !line.is_empty() {
-                    let _ = app_clone.emit("claude-stderr", line);
+                    let payload = StreamPayload {
+                        query_id: query_id_for_stderr.clone(),
+                        data: line,
+                    };
+                    let _ = app_clone.emit("claude-stderr", payload);
                 }
             }
         });
     }
 
-    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let mut reader = BufReader::new(stdout).lines();
+    let query_id_for_stream = query_id.clone();
 
     while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
         if !line.is_empty() {
-            app.emit("claude-stream", line).map_err(|e| e.to_string())?;
+            let payload = StreamPayload {
+                query_id: query_id_for_stream.clone(),
+                data: line,
+            };
+            app.emit("claude-stream", payload).map_err(|e| e.to_string())?;
         }
     }
 
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+    // Wait for process completion and clean up
+    let status = {
+        let mut queries = active_queries.lock().await;
+        if let Some(mut active_query) = queries.remove(&query_id_for_storage) {
+            active_query.child.wait().await.map_err(|e| e.to_string())?
+        } else {
+            // Query was cancelled, return early
+            return Ok(query_id);
+        }
+    };
 
-    app.emit("claude-done", status.code().unwrap_or(-1))
+    let done_payload = serde_json::json!({
+        "query_id": query_id,
+        "code": status.code().unwrap_or(-1)
+    });
+    app.emit("claude-done", done_payload)
         .map_err(|e| e.to_string())?;
 
-    Ok(())
+    Ok(query_id)
+}
+
+#[tauri::command]
+async fn cancel_query(state: State<'_, AppState>, query_id: String) -> Result<bool, String> {
+    let mut queries = state.active_queries.lock().await;
+
+    if let Some(mut active_query) = queries.remove(&query_id) {
+        // Try to kill the process
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+
+            if let Some(pid) = active_query.child.id() {
+                // Send SIGTERM first for graceful shutdown
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+
+                // Wait a bit then force kill if still running
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                // Check if still running and force kill
+                match active_query.child.try_wait() {
+                    Ok(None) => {
+                        // Still running, force kill
+                        let _ = active_query.child.kill().await;
+                    }
+                    _ => {}
+                }
+            } else {
+                // No PID, just try to kill
+                let _ = active_query.child.kill().await;
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix systems, just kill directly
+            let _ = active_query.child.kill().await;
+        }
+
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+async fn list_active_queries(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let queries = state.active_queries.lock().await;
+    Ok(queries.keys().cloned().collect())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -475,7 +652,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![query_claude, list_sessions, load_session_messages])
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            query_claude,
+            cancel_query,
+            list_active_queries,
+            list_sessions,
+            load_session_messages
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
