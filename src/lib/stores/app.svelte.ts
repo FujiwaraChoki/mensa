@@ -1,7 +1,7 @@
 // mensa - App State Management (Svelte 5 Runes)
 
 import { browser } from '$app/environment';
-import type { AppState, AppConfig, Message, ToolExecution, WorkspaceConfig, ClaudeConfig, MCPServerConfig, PermissionMode, Attachment, MessageBlock, SubagentGroup, SettingSource, SlashCommand } from '$lib/types';
+import type { AppState, AppConfig, Message, ToolExecution, WorkspaceConfig, ClaudeConfig, MCPServerConfig, PermissionMode, Attachment, MessageBlock, SubagentGroup, SettingSource, SlashCommand, Theme } from '$lib/types';
 
 const DEFAULT_CLAUDE_CONFIG: ClaudeConfig = {
   permissionMode: 'acceptEdits',
@@ -19,6 +19,8 @@ function createAppConfig() {
   let onboardingCompleted = $state(false);
   let workspace = $state<WorkspaceConfig | undefined>(undefined);
   let claude = $state<ClaudeConfig>({ ...DEFAULT_CLAUDE_CONFIG });
+  let theme = $state<Theme>('system');
+  let themeUserSet = $state(false); // True once user has manually changed theme
   let _initialized = $state(false);
 
   // Load from localStorage (call this from client-side code)
@@ -32,7 +34,9 @@ function createAppConfig() {
         onboardingCompleted = data.onboardingCompleted ?? false;
         workspace = data.workspace ?? undefined;
         claude = { ...DEFAULT_CLAUDE_CONFIG, ...data.claude };
-        console.log('[mensa] Hydrated config from localStorage:', { onboardingCompleted, workspace, claude });
+        theme = data.theme ?? 'system';
+        themeUserSet = data.themeUserSet ?? false;
+        console.log('[mensa] Hydrated config from localStorage:', { onboardingCompleted, workspace, claude, theme, themeUserSet });
       } catch (e) {
         console.error('[mensa] Failed to parse stored config:', e);
       }
@@ -42,7 +46,7 @@ function createAppConfig() {
 
   function save() {
     if (!browser) return;
-    const data = { onboardingCompleted, workspace, claude };
+    const data = { onboardingCompleted, workspace, claude, theme, themeUserSet };
     localStorage.setItem('mensa-config', JSON.stringify(data));
     console.log('[mensa] Saved config to localStorage:', data);
   }
@@ -57,6 +61,8 @@ function createAppConfig() {
     get onboardingCompleted() { return onboardingCompleted; },
     get initialized() { return _initialized; },
     get claude() { return claude; },
+    get theme() { return theme; },
+    get themeUserSet() { return themeUserSet; },
 
     hydrate,
 
@@ -67,6 +73,12 @@ function createAppConfig() {
 
     completeOnboarding() {
       onboardingCompleted = true;
+      save();
+    },
+
+    setTheme(newTheme: Theme) {
+      theme = newTheme;
+      themeUserSet = true;
       save();
     },
 
@@ -114,6 +126,8 @@ function createAppConfig() {
       onboardingCompleted = false;
       workspace = undefined;
       claude = { ...DEFAULT_CLAUDE_CONFIG };
+      theme = 'system';
+      themeUserSet = false;
       if (browser) {
         localStorage.removeItem('mensa-config');
         console.log('[mensa] Config reset');

@@ -2,6 +2,8 @@
 
 export type AppState = 'onboarding' | 'chat';
 
+export type Theme = 'light' | 'dark' | 'system';
+
 export type OnboardingStep = 'welcome' | 'workspace' | 'ready';
 
 // Attachment types
