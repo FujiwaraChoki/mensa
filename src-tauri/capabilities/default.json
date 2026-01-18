@@ -9,6 +9,7 @@
     "dialog:default",
     "shell:default",
     "fs:default",
-    "fs:allow-read"
+    "fs:allow-read",
+    "core:window:allow-start-dragging"
   ]
 }
