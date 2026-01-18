@@ -3,10 +3,20 @@
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
   import { appState, appConfig } from '$lib/stores/app.svelte';
+  import { applyTheme, subscribeToSystemTheme } from '$lib/services/theme';
   import Onboarding from '$lib/components/Onboarding.svelte';
   import Chat from '$lib/components/Chat.svelte';
 
   let ready = $state(false);
+
+  // Apply theme reactively
+  $effect(() => {
+    if (!browser) return;
+    applyTheme(appConfig.theme);
+    if (appConfig.theme === 'system') {
+      return subscribeToSystemTheme(() => applyTheme('system'));
+    }
+  });
 
   onMount(() => {
     // Ensure hydration happened (should be automatic but let's be safe)

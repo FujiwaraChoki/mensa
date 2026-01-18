@@ -5,6 +5,8 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { invoke } from '@tauri-apps/api/core';
   import { uiState, appConfig, pendingAttachments, slashCommands } from '$lib/stores/app.svelte';
+  import { getEffectiveTheme } from '$lib/services/theme';
+  import type { Theme } from '$lib/types';
   import { sessionStore } from '$lib/stores/sessions.svelte';
   import { queryClaudeStreaming, type ClaudeStreamEvent, type ClaudeQueryConfig } from '$lib/services/claude';
   import { openFilePicker, processFile, handlePasteImage, handleDroppedFiles, buildMessageContent, formatFileSize } from '$lib/services/attachments';
@@ -35,6 +37,17 @@
   const currentMessages = $derived(currentSession?.messages ?? []);
   const isStreaming = $derived(currentSession?.status === 'streaming');
   const currentSubagentGroups = $derived(currentSession?.subagentGroups ?? []);
+
+  // Theme derived state
+  const effectiveTheme = $derived(getEffectiveTheme(appConfig.theme));
+  // Before user interacts: show effective theme icon (sun/moon) even for system mode
+  // After user interacts: show actual setting icon (sun/moon/monitor)
+  const showSystemIcon = $derived(appConfig.themeUserSet && appConfig.theme === 'system');
+  const themeTitle = $derived(
+    appConfig.theme === 'system'
+      ? `System · ${effectiveTheme === 'light' ? 'Light' : 'Dark'}`
+      : effectiveTheme === 'light' ? 'Light' : 'Dark'
+  );
 
   // Helper to get subagent group by task tool ID from current session
   function getGroupByTaskToolId(taskToolId: string) {
@@ -576,6 +589,13 @@
     resumeSessionId = null;
   }
 
+  function cycleTheme() {
+    const themes: Theme[] = ['light', 'dark', 'system'];
+    const currentIndex = themes.indexOf(appConfig.theme);
+    const nextIndex = (currentIndex + 1) % themes.length;
+    appConfig.setTheme(themes[nextIndex]);
+  }
+
   // Attachment handlers
   async function handleAddAttachment() {
     if (!pendingAttachments.canAdd || isStreaming) return;
@@ -762,6 +782,25 @@
       </div>
     </div>
     <div class="header-right no-drag">
+      <button
+        class="icon-btn"
+        onclick={cycleTheme}
+        title={themeTitle}
+      >
+        {#if showSystemIcon}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+          </svg>
+        {:else if effectiveTheme === 'light'}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          </svg>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        {/if}
+      </button>
       <button
         class="icon-btn"
         onclick={startNewThread}
@@ -1777,7 +1816,7 @@
   .attachment-preview .remove-attachment svg {
     width: 10px;
     height: 10px;
-    color: var(--white);
+    color: #ffffff;
   }
 
   .attachment-preview .attachment-name {

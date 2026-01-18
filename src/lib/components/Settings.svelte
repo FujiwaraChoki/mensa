@@ -817,4 +817,5 @@
     background: var(--gray-200);
     border-radius: 4px;
   }
+
 </style>
