@@ -18,6 +18,8 @@
   import InlineTool from './InlineTool.svelte';
   import SubagentGroup from './SubagentGroup.svelte';
   import SessionTabs from './SessionTabs.svelte';
+  import QuestionCard from './QuestionCard.svelte';
+  import PlanApproval from './PlanApproval.svelte';
 
   let inputValue = $state('');
   let showSettings = $state(false);
@@ -48,6 +50,70 @@
       ? `System · ${effectiveTheme === 'light' ? 'Light' : 'Dark'}`
       : effectiveTheme === 'light' ? 'Light' : 'Dark'
   );
+
+  // Plan mode state
+  const isPlanMode = $derived(currentSession?.planMode ?? false);
+  const hasPendingQuestion = $derived(currentSession?.pendingQuestion != null);
+  const hasPlanApprovalPending = $derived(currentSession?.planApprovalPending ?? false);
+
+  function togglePlanMode() {
+    let sessionId = sessionStore.activeSessionId;
+
+    // Create a session if one doesn't exist
+    if (!sessionId) {
+      sessionId = sessionStore.createSession();
+      sessionStore.switchToSession(sessionId);
+    }
+
+    const session = sessionStore.getSession(sessionId);
+    if (session) {
+      sessionStore.setPlanMode(sessionId, !session.planMode);
+    }
+  }
+
+  async function handleQuestionAnswer(answers: string[]) {
+    if (!currentSession?.pendingQuestion || !currentSession.pendingQuestionToolUseId) return;
+
+    const sessionId = currentSession.id;
+    const answer = answers.join(', ');
+
+    // Clear the pending question
+    sessionStore.clearPendingQuestion(sessionId);
+
+    // Add the user's answer as a message
+    sessionStore.addMessage(sessionId, { role: 'user', content: answer, blocks: [] });
+
+    // Continue the query with the answer
+    // The answer will be sent as a tool result in the next query
+    await queryClaudeReal(sessionId, answer);
+  }
+
+  async function handleApprovePlan() {
+    if (!currentSession) return;
+
+    const sessionId = currentSession.id;
+
+    // Mark plan as approved and exit plan mode
+    sessionStore.approvePlan(sessionId);
+
+    // Add a message indicating plan approval
+    sessionStore.addMessage(sessionId, { role: 'user', content: 'Plan approved. Proceeding with implementation.', blocks: [] });
+
+    // Continue with execution mode (acceptEdits)
+    await queryClaudeReal(sessionId, 'The user has approved the plan. Please proceed with the implementation.');
+  }
+
+  function handleRejectPlan() {
+    if (!currentSession) return;
+
+    const sessionId = currentSession.id;
+
+    // Reject the plan but stay in plan mode
+    sessionStore.rejectPlan(sessionId);
+
+    // Add a message indicating plan rejection
+    sessionStore.addMessage(sessionId, { role: 'assistant', content: 'Plan rejected. You can provide additional guidance or start a new plan.', blocks: [] });
+  }
 
   // Helper to get subagent group by task tool ID from current session
   function getGroupByTaskToolId(taskToolId: string) {
@@ -283,6 +349,13 @@
   }
 
   async function handleKeydown(e: KeyboardEvent) {
+    // Shift+Tab to toggle plan mode
+    if (e.key === 'Tab' && e.shiftKey && !isStreaming) {
+      e.preventDefault();
+      togglePlanMode();
+      return;
+    }
+
     // Handle slash menu navigation
     if (showSlashMenu) {
       const commands = filteredSlashCommands();
@@ -378,8 +451,10 @@
     sessionStore.addMessage(sessionId, { role: 'assistant', content: '', blocks: [] });
 
     const workingDir = appConfig.workspace?.path || '.';
+    const session = sessionStore.getSession(sessionId);
     const config: ClaudeQueryConfig = {
-      permissionMode: appConfig.claude.permissionMode,
+      // Use plan mode if session is in plan mode, otherwise use app config
+      permissionMode: session?.planMode ? 'plan' : appConfig.claude.permissionMode,
       maxTurns: appConfig.claude.maxTurns,
       mcpServers: appConfig.claude.mcpServers,
       // Skills configuration
@@ -506,6 +581,43 @@
             console.log('[chat] RECEIVED system_init, slash commands:', event.slashCommands?.length);
             if (event.slashCommands && event.slashCommands.length > 0) {
               slashCommands.set(event.slashCommands);
+            }
+            break;
+
+          case 'ask_user_question':
+            console.log('[chat] RECEIVED ask_user_question:', event.questions);
+            if (event.questions && event.questions.length > 0 && event.toolUseId) {
+              // Store the first question (we handle one at a time)
+              sessionStore.setPendingQuestion(sessionId, event.questions[0], event.toolUseId);
+              scrollToBottom();
+            }
+            break;
+
+          case 'exit_plan_mode':
+            console.log('[chat] RECEIVED exit_plan_mode:', event.allowedPrompts, 'planContent length:', event.planContent?.length);
+            // Use plan content from event if available, otherwise try to read from file
+            if (event.planContent) {
+              sessionStore.setPlanFile(sessionId, 'plan.md', event.planContent);
+              sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
+              scrollToBottom();
+            } else {
+              // Fallback: read the most recent plan file (async)
+              invoke<string[]>('list_plan_files', { workspacePath: workingDir })
+                .then(planFiles => {
+                  if (planFiles.length > 0) {
+                    return invoke<string>('read_plan_file', {
+                      workspacePath: workingDir,
+                      planFilename: planFiles[0]
+                    }).then(planContent => {
+                      sessionStore.setPlanFile(sessionId, planFiles[0], planContent);
+                      sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
+                      scrollToBottom();
+                    });
+                  }
+                })
+                .catch(e => {
+                  console.error('[chat] Failed to read plan file:', e);
+                });
             }
             break;
 
@@ -996,6 +1108,23 @@
                   </div>
                 </div>
               {/each}
+
+              <!-- Plan mode interactive components -->
+              {#if hasPendingQuestion && currentSession?.pendingQuestion}
+                <QuestionCard
+                  question={currentSession.pendingQuestion}
+                  onAnswer={handleQuestionAnswer}
+                />
+              {/if}
+
+              {#if hasPlanApprovalPending && currentSession?.planContent}
+                <PlanApproval
+                  planContent={currentSession.planContent}
+                  permissions={currentSession.planApprovedPermissions}
+                  onApprove={handleApprovePlan}
+                  onReject={handleRejectPlan}
+                />
+              {/if}
             </div>
           {/if}
         </div>
@@ -1005,6 +1134,23 @@
       <div class="input-area">
         <div class="input-inner">
           <!-- Attachment previews -->
+          <!-- Plan mode banner -->
+          {#if isPlanMode}
+            <div class="plan-mode-banner" in:fly={{ y: 5, duration: 150 }}>
+              <span class="plan-mode-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/>
+                </svg>
+              </span>
+              <span class="plan-mode-text">Plan Mode - Claude will analyze and plan without making changes</span>
+              <button class="plan-mode-dismiss" onclick={togglePlanMode} title="Exit Plan Mode">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+              </button>
+            </div>
+          {/if}
+
           {#if pendingAttachments.count > 0}
             <div class="attachment-previews" in:fly={{ y: 10, duration: 150 }}>
               {#each pendingAttachments.all as attachment (attachment.id)}
@@ -1034,7 +1180,7 @@
             </div>
           {/if}
 
-          <div class="input-box">
+          <div class="input-box" class:plan-mode-active={isPlanMode}>
             <!-- Attachment button -->
             <button
               class="attach-btn"
@@ -1056,6 +1202,17 @@
               onpaste={handlePaste}
               disabled={isStreaming}
             ></textarea>
+            <button
+              class="plan-mode-btn"
+              class:active={isPlanMode}
+              onclick={togglePlanMode}
+              disabled={isStreaming}
+              title="Plan Mode (Shift+Tab)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/>
+              </svg>
+            </button>
             <button
               class="send-btn"
               disabled={(!inputValue.trim() && pendingAttachments.count === 0) || isStreaming}
@@ -1143,7 +1300,7 @@
           {/if}
 
           <p class="input-hint">
-            <kbd>↵</kbd> send · <kbd>⇧↵</kbd> new line{#if slashCommands.count > 0} · <kbd>/</kbd> commands{/if} · <kbd>@</kbd> files
+            <kbd>↵</kbd> send · <kbd>⇧↵</kbd> new line · <kbd>⇧⇥</kbd> plan mode{#if slashCommands.count > 0} · <kbd>/</kbd> commands{/if} · <kbd>@</kbd> files
           </p>
         </div>
       </div>
@@ -1629,6 +1786,64 @@
     border-color: var(--gray-300);
   }
 
+  /* Plan mode rainbow gradient border */
+  .input-box.plan-mode-active {
+    position: relative;
+    border-color: transparent;
+    background: var(--white);
+  }
+
+  .input-box.plan-mode-active::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 17px;
+    padding: 1px;
+    background: linear-gradient(
+      90deg,
+      rgba(255, 107, 107, 0.4),
+      rgba(255, 193, 94, 0.4),
+      rgba(255, 240, 102, 0.4),
+      rgba(144, 238, 144, 0.4),
+      rgba(135, 206, 250, 0.4),
+      rgba(186, 135, 250, 0.4),
+      rgba(255, 182, 193, 0.4),
+      rgba(255, 107, 107, 0.4)
+    );
+    background-size: 300% 100%;
+    animation: rainbow-shift 8s linear infinite;
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .input-box.plan-mode-active:focus-within::before {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 107, 107, 0.6),
+      rgba(255, 193, 94, 0.6),
+      rgba(255, 240, 102, 0.6),
+      rgba(144, 238, 144, 0.6),
+      rgba(135, 206, 250, 0.6),
+      rgba(186, 135, 250, 0.6),
+      rgba(255, 182, 193, 0.6),
+      rgba(255, 107, 107, 0.6)
+    );
+    background-size: 300% 100%;
+  }
+
+  @keyframes rainbow-shift {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 300% 50%; }
+  }
+
   .input-box textarea {
     flex: 1;
     padding: 0.5rem 0.625rem;
@@ -1688,6 +1903,107 @@
     border-top-color: var(--white);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
+  }
+
+  /* Plan mode button */
+  .plan-mode-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--gray-100);
+    border: 1px solid var(--gray-200);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .plan-mode-btn:hover:not(:disabled) {
+    background: var(--gray-200);
+    border-color: var(--gray-300);
+  }
+
+  .plan-mode-btn.active {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
+  .plan-mode-btn.active:hover:not(:disabled) {
+    background: rgba(59, 130, 246, 0.2);
+    border-color: rgba(59, 130, 246, 0.4);
+  }
+
+  .plan-mode-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .plan-mode-btn svg {
+    width: 16px;
+    height: 16px;
+    color: var(--gray-500);
+  }
+
+  .plan-mode-btn.active svg {
+    color: rgba(59, 130, 246, 0.9);
+  }
+
+  /* Plan mode banner */
+  .plan-mode-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    background: rgba(59, 130, 246, 0.08);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 8px;
+    margin-bottom: 0.625rem;
+  }
+
+  .plan-mode-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .plan-mode-icon svg {
+    width: 16px;
+    height: 16px;
+    color: rgba(59, 130, 246, 0.7);
+  }
+
+  .plan-mode-text {
+    flex: 1;
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    color: rgba(59, 130, 246, 0.9);
+  }
+
+  .plan-mode-dismiss {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .plan-mode-dismiss:hover {
+    background: rgba(59, 130, 246, 0.15);
+  }
+
+  .plan-mode-dismiss svg {
+    width: 12px;
+    height: 12px;
+    color: rgba(59, 130, 246, 0.7);
   }
 
   .empty-state .spinner {

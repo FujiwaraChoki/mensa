@@ -1,6 +1,6 @@
 // mensa - Multi-Session State Management (Svelte 5 Runes)
 
-import type { Message, ToolExecution, SubagentGroup, MessageBlock, Attachment } from '$lib/types';
+import type { Message, ToolExecution, SubagentGroup, MessageBlock, Attachment, PlanModeQuestion, AllowedPrompt } from '$lib/types';
 import type { QueryHandle } from '$lib/services/claude';
 
 export type SessionStatus = 'idle' | 'streaming' | 'completed' | 'error' | 'cancelled';
@@ -18,6 +18,14 @@ export interface SessionState {
   error?: string;
   createdAt: Date;
   queryHandle?: QueryHandle;     // For cancellation
+  // Plan mode fields
+  planMode: boolean;                          // Whether session is in plan mode
+  planFilePath?: string;                      // Path to current plan file
+  planContent?: string;                       // Cached plan content
+  planApprovalPending?: boolean;              // Waiting for user to approve plan
+  planApprovedPermissions?: AllowedPrompt[];  // Permissions approved with plan
+  pendingQuestion?: PlanModeQuestion;         // Question waiting for user answer
+  pendingQuestionToolUseId?: string;          // Tool use ID for the pending question
 }
 
 function createSessionStore() {
@@ -54,6 +62,11 @@ function createSessionStore() {
       );
     },
 
+    // Get a session by ID
+    getSession(id: string): SessionState | undefined {
+      return sessions.get(id);
+    },
+
     // Create a new session
     createSession(initialTitle?: string): string {
       const id = generateId();
@@ -67,6 +80,7 @@ function createSessionStore() {
         pendingTools: new Map(),
         toolUseIdToName: new Map(),
         createdAt: new Date(),
+        planMode: false,
       };
       sessions = new Map(sessions).set(id, session);
       return id;
@@ -438,6 +452,101 @@ function createSessionStore() {
         toolUseIdToName: new Map(),
         status: 'idle',
         error: undefined,
+        planMode: false,
+        planFilePath: undefined,
+        planContent: undefined,
+        planApprovalPending: undefined,
+        planApprovedPermissions: undefined,
+        pendingQuestion: undefined,
+        pendingQuestionToolUseId: undefined,
+      });
+    },
+
+    // Plan mode management
+    setPlanMode(sessionId: string, enabled: boolean): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        planMode: enabled,
+        // Clear plan state when disabling plan mode
+        ...(enabled ? {} : {
+          planFilePath: undefined,
+          planContent: undefined,
+          planApprovalPending: undefined,
+          planApprovedPermissions: undefined,
+          pendingQuestion: undefined,
+          pendingQuestionToolUseId: undefined,
+        }),
+      });
+    },
+
+    setPlanFile(sessionId: string, path: string, content: string): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        planFilePath: path,
+        planContent: content,
+      });
+    },
+
+    setPlanApprovalPending(sessionId: string, pending: boolean, permissions?: AllowedPrompt[]): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        planApprovalPending: pending,
+        planApprovedPermissions: permissions,
+      });
+    },
+
+    approvePlan(sessionId: string): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        planMode: false,
+        planApprovalPending: false,
+      });
+    },
+
+    rejectPlan(sessionId: string): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        planApprovalPending: false,
+        planFilePath: undefined,
+        planContent: undefined,
+        planApprovedPermissions: undefined,
+      });
+    },
+
+    setPendingQuestion(sessionId: string, question: PlanModeQuestion, toolUseId: string): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        pendingQuestion: question,
+        pendingQuestionToolUseId: toolUseId,
+      });
+    },
+
+    clearPendingQuestion(sessionId: string): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      sessions = new Map(sessions).set(sessionId, {
+        ...session,
+        pendingQuestion: undefined,
+        pendingQuestionToolUseId: undefined,
       });
     },
 

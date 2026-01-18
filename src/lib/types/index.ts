@@ -118,7 +118,7 @@ export interface MCPServerConfig {
   headers?: Record<string, string>;
 }
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions';
+export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 
 // Skills configuration
 export type SettingSource = 'user' | 'project';
@@ -155,6 +155,24 @@ export interface MentionItem {
   value: string;        // path for files, name for skills
   displayName: string;  // shown in UI
   isDirectory?: boolean; // for file navigation
+}
+
+// Plan mode types
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface PlanModeQuestion {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+}
+
+export interface AllowedPrompt {
+  tool: string;
+  prompt: string;
 }
 
 // Re-export session types from the store for convenience

@@ -645,6 +645,49 @@ async fn list_active_queries(state: State<'_, AppState>) -> Result<Vec<String>, 
     Ok(queries.keys().cloned().collect())
 }
 
+#[tauri::command]
+async fn read_plan_file(workspace_path: String, plan_filename: String) -> Result<String, String> {
+    let plan_path = Path::new(&workspace_path)
+        .join(".claude")
+        .join("plans")
+        .join(&plan_filename);
+
+    tokio::fs::read_to_string(&plan_path)
+        .await
+        .map_err(|e| format!("Failed to read plan file: {}", e))
+}
+
+#[tauri::command]
+async fn list_plan_files(workspace_path: String) -> Result<Vec<String>, String> {
+    let plans_dir = Path::new(&workspace_path)
+        .join(".claude")
+        .join("plans");
+
+    if !plans_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut entries = tokio::fs::read_dir(&plans_dir)
+        .await
+        .map_err(|e| format!("Failed to read plans directory: {}", e))?;
+
+    let mut plan_files = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        let path = entry.path();
+        if path.extension().map(|e| e == "md").unwrap_or(false) {
+            if let Some(name) = path.file_name() {
+                plan_files.push(name.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Sort by name (which often includes timestamps)
+    plan_files.sort();
+    plan_files.reverse(); // Most recent first
+
+    Ok(plan_files)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -658,7 +701,9 @@ pub fn run() {
             cancel_query,
             list_active_queries,
             list_sessions,
-            load_session_messages
+            load_session_messages,
+            read_plan_file,
+            list_plan_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

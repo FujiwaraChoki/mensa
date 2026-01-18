@@ -3,10 +3,10 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ContentBlock, SettingSource, SlashCommand } from '$lib/types';
+import type { ContentBlock, SettingSource, SlashCommand, PlanModeQuestion, AllowedPrompt } from '$lib/types';
 
 export interface ClaudeStreamEvent {
-  type: 'text' | 'tool_use' | 'tool_result' | 'error' | 'done' | 'system_init' | 'cancelled';
+  type: 'text' | 'tool_use' | 'tool_result' | 'error' | 'done' | 'system_init' | 'cancelled' | 'ask_user_question' | 'exit_plan_mode';
   queryId?: string;
   content?: string;
   tool?: {
@@ -18,6 +18,13 @@ export interface ClaudeStreamEvent {
   error?: string;
   slashCommands?: SlashCommand[];
   reason?: string;  // For cancelled events
+  // For ask_user_question
+  questions?: PlanModeQuestion[];
+  toolUseId?: string;
+  // For exit_plan_mode
+  planFilePath?: string;
+  allowedPrompts?: AllowedPrompt[];
+  planContent?: string;
 }
 
 export type StreamCallback = (event: ClaudeStreamEvent) => void;
@@ -305,6 +312,30 @@ function handleClaudeMessage(
               toolUseIdToName.set(block.id, name);
             }
 
+            // Check for plan mode special tools
+            const input = block.input as Record<string, unknown>;
+            if (name === 'AskUserQuestion') {
+              console.log('[claude] AskUserQuestion tool detected');
+              const questions = input?.questions as PlanModeQuestion[] || [];
+              onEvent({
+                type: 'ask_user_question',
+                questions,
+                toolUseId: block.id,
+              });
+              // Also emit as regular tool_use for UI display
+            } else if (name === 'ExitPlanMode') {
+              console.log('[claude] ExitPlanMode tool detected, input:', input);
+              const allowedPrompts = input?.allowedPrompts as AllowedPrompt[] || [];
+              const planContent = input?.plan as string || '';
+              onEvent({
+                type: 'exit_plan_mode',
+                allowedPrompts,
+                toolUseId: block.id,
+                planContent,
+              });
+              // Also emit as regular tool_use for UI display
+            }
+
             const event = {
               type: 'tool_use' as const,
               tool: {
@@ -333,6 +364,28 @@ function handleClaudeMessage(
     if (name && name !== 'unknown') {
       if (toolId) {
         toolUseIdToName.set(toolId, name);
+      }
+
+      // Check for plan mode special tools
+      const input = msg.input as Record<string, unknown>;
+      if (name === 'AskUserQuestion') {
+        console.log('[claude] AskUserQuestion tool detected (tool_call)');
+        const questions = input?.questions as PlanModeQuestion[] || [];
+        onEvent({
+          type: 'ask_user_question',
+          questions,
+          toolUseId: toolId,
+        });
+      } else if (name === 'ExitPlanMode') {
+        console.log('[claude] ExitPlanMode tool detected (tool_call), input:', input);
+        const allowedPrompts = input?.allowedPrompts as AllowedPrompt[] || [];
+        const planContent = input?.plan as string || '';
+        onEvent({
+          type: 'exit_plan_mode',
+          allowedPrompts,
+          toolUseId: toolId,
+          planContent,
+        });
       }
 
       const event = {
