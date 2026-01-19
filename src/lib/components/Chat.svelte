@@ -23,7 +23,8 @@
   import VimInput from './VimInput.svelte';
 
   let inputValue = $state('');
-  let vimInputRef: { focus: () => void; getView: () => any } | undefined;
+  let vimInputRef: { focus: () => void; getView: () => any; getVimMode: () => 'normal' | 'insert' | 'visual' } | undefined;
+  let vimMode = $state<'normal' | 'insert' | 'visual'>('normal');
   let showSettings = $state(false);
   let showCommandPalette = $state(false);
   let showSessionPicker = $state(false);
@@ -1207,6 +1208,13 @@
             </div>
           {/if}
 
+          <!-- Vim mode indicator -->
+          {#if appConfig.claude.vimMode}
+            <div class="vim-mode-indicator" class:insert={vimMode === 'insert'} class:visual={vimMode === 'visual'}>
+              {vimMode.toUpperCase()}
+            </div>
+          {/if}
+
           <div class="input-box" class:plan-mode-active={isPlanMode}>
             <!-- Attachment button -->
             <button
@@ -1228,6 +1236,7 @@
                 onsubmit={sendMessage}
                 oninput={handleInput}
                 onpaste={handlePaste}
+                onmodechange={(mode) => vimMode = mode}
               />
             {:else}
               <textarea
@@ -1811,6 +1820,30 @@
   .input-inner {
     width: 100%;
     max-width: 680px;
+  }
+
+  .vim-mode-indicator {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--gray-200);
+    color: var(--gray-500);
+    margin-bottom: 6px;
+    transition: all var(--transition-fast);
+    width: fit-content;
+  }
+
+  .vim-mode-indicator.insert {
+    background: rgba(34, 197, 94, 0.15);
+    color: rgb(22, 163, 74);
+  }
+
+  .vim-mode-indicator.visual {
+    background: rgba(168, 85, 247, 0.15);
+    color: rgb(147, 51, 234);
   }
 
   .input-box {

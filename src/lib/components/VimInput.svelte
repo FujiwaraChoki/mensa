@@ -13,14 +13,20 @@
     onsubmit: () => void;
     oninput?: () => void;
     onpaste?: (e: ClipboardEvent) => void;
+    onmodechange?: (mode: 'normal' | 'insert' | 'visual') => void;
   }
 
-  let { value = $bindable(''), placeholder = 'Message Claude...', disabled = false, onsubmit, oninput, onpaste }: Props = $props();
+  let { value = $bindable(''), placeholder = 'Message Claude...', disabled = false, onsubmit, oninput, onpaste, onmodechange }: Props = $props();
 
   let editorContainer: HTMLDivElement;
   let view: EditorView | null = null;
-  let vimMode = $state<'normal' | 'insert' | 'visual'>('normal');
+  let currentVimMode = $state<'normal' | 'insert' | 'visual'>('normal');
   const themeCompartment = new Compartment();
+
+  // Expose vim mode for parent component
+  export function getVimMode() {
+    return currentVimMode;
+  }
   const readOnlyCompartment = new Compartment();
 
   // Reactive theme
@@ -174,12 +180,15 @@
           const state = cm.state;
           if (state.vim) {
             const vimState = state.vim as { visualMode?: boolean; insertMode?: boolean };
+            let newMode: 'normal' | 'insert' | 'visual' = 'normal';
             if (vimState.visualMode) {
-              vimMode = 'visual';
+              newMode = 'visual';
             } else if (vimState.insertMode) {
-              vimMode = 'insert';
-            } else {
-              vimMode = 'normal';
+              newMode = 'insert';
+            }
+            if (newMode !== currentVimMode) {
+              currentVimMode = newMode;
+              onmodechange?.(newMode);
             }
           }
         }
@@ -230,51 +239,9 @@
   }
 </script>
 
-<div class="vim-input-wrapper">
-  <div class="vim-mode-indicator" class:insert={vimMode === 'insert'} class:visual={vimMode === 'visual'}>
-    {#if vimMode === 'normal'}
-      NORMAL
-    {:else if vimMode === 'insert'}
-      INSERT
-    {:else if vimMode === 'visual'}
-      VISUAL
-    {/if}
-  </div>
-  <div class="vim-editor" class:disabled bind:this={editorContainer}></div>
-</div>
+<div class="vim-editor" class:disabled bind:this={editorContainer}></div>
 
 <style>
-  .vim-input-wrapper {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .vim-mode-indicator {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    background: var(--gray-200);
-    color: var(--gray-500);
-    align-self: flex-start;
-    margin-bottom: 4px;
-    transition: all var(--transition-fast);
-  }
-
-  .vim-mode-indicator.insert {
-    background: rgba(34, 197, 94, 0.15);
-    color: rgb(22, 163, 74);
-  }
-
-  .vim-mode-indicator.visual {
-    background: rgba(168, 85, 247, 0.15);
-    color: rgb(147, 51, 234);
-  }
-
   .vim-editor {
     flex: 1;
     border-radius: var(--radius-md);
