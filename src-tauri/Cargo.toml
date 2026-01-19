@@ -1,6 +1,6 @@
 [package]
 name = "mensa"
-version = "0.1.1"
+version = "0.1.2"
 description = "A GUI wrapper and IDE for Claude Code"
 authors = ["Sami Hindi <sami@samihindi.com>"]
 license = "MIT WITH Commons-Clause"
