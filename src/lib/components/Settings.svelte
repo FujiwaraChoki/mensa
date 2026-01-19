@@ -125,6 +125,26 @@
             onchange={(e) => appConfig.setMaxTurns(parseInt(e.currentTarget.value) || 25)}
           />
         </div>
+
+        <div class="section">
+          <h3>Input Mode</h3>
+          <p class="hint">Choose your preferred text input style</p>
+
+          <div class="toggle-row">
+            <div class="toggle-label">
+              <span>Vim Mode</span>
+              <span class="toggle-hint">Use vim keybindings for text input (i=insert, Esc=normal, Enter=send)</span>
+            </div>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                checked={appConfig.claude.vimMode}
+                onchange={(e) => appConfig.setVimMode(e.currentTarget.checked)}
+              />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
       {:else if activeTab === 'skills'}
         <div class="section">
           <h3>Skills & Commands</h3>

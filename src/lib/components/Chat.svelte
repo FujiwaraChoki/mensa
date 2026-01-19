@@ -20,8 +20,10 @@
   import SessionTabs from './SessionTabs.svelte';
   import QuestionCard from './QuestionCard.svelte';
   import PlanApproval from './PlanApproval.svelte';
+  import VimInput from './VimInput.svelte';
 
   let inputValue = $state('');
+  let vimInputRef: { focus: () => void; getView: () => any } | undefined;
   let showSettings = $state(false);
   let showCommandPalette = $state(false);
   let showSessionPicker = $state(false);
@@ -1217,16 +1219,28 @@
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
               </svg>
             </button>
-            <textarea
-              bind:this={inputEl}
-              bind:value={inputValue}
-              placeholder="Message Claude..."
-              rows="1"
-              onkeydown={handleKeydown}
-              oninput={(e) => { autoResize(e); handleInput(); }}
-              onpaste={handlePaste}
-              disabled={isStreaming}
-            ></textarea>
+            {#if appConfig.claude.vimMode}
+              <VimInput
+                bind:this={vimInputRef}
+                bind:value={inputValue}
+                placeholder="Message Claude..."
+                disabled={isStreaming}
+                onsubmit={sendMessage}
+                oninput={handleInput}
+                onpaste={handlePaste}
+              />
+            {:else}
+              <textarea
+                bind:this={inputEl}
+                bind:value={inputValue}
+                placeholder="Message Claude..."
+                rows="1"
+                onkeydown={handleKeydown}
+                oninput={(e) => { autoResize(e); handleInput(); }}
+                onpaste={handlePaste}
+                disabled={isStreaming}
+              ></textarea>
+            {/if}
             <button
               class="plan-mode-btn"
               class:active={isPlanMode}
@@ -1325,7 +1339,11 @@
           {/if}
 
           <p class="input-hint">
-            <kbd>↵</kbd> send · <kbd>⇧↵</kbd> new line · <kbd>⇧⇥</kbd> plan mode{#if slashCommands.count > 0} · <kbd>/</kbd> commands{/if} · <kbd>@</kbd> files
+            {#if appConfig.claude.vimMode}
+              <kbd>↵</kbd> send (normal) · <kbd>i</kbd> insert · <kbd>Esc</kbd>/<kbd>jj</kbd> normal{#if slashCommands.count > 0} · <kbd>/</kbd> commands{/if} · <kbd>@</kbd> files
+            {:else}
+              <kbd>↵</kbd> send · <kbd>⇧↵</kbd> new line · <kbd>⇧⇥</kbd> plan mode{#if slashCommands.count > 0} · <kbd>/</kbd> commands{/if} · <kbd>@</kbd> files
+            {/if}
           </p>
         </div>
       </div>

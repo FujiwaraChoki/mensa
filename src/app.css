@@ -140,3 +140,37 @@ body {
 .no-drag {
   -webkit-app-region: no-drag;
 }
+
+/* CodeMirror Vim Mode Styles */
+.cm-editor {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+}
+
+.cm-editor .cm-scroller {
+  font-family: inherit;
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+/* Vim fat cursor in normal mode */
+.cm-editor .cm-fat-cursor .cm-cursor {
+  background: var(--off-black);
+  border: none;
+  width: 0.6em;
+}
+
+.cm-editor .cm-fat-cursor .cm-cursor-primary {
+  background: var(--off-black);
+}
+
+/* Selection highlighting */
+.cm-editor .cm-selectionBackground {
+  background: rgba(10, 10, 10, 0.12) !important;
+}
+
+[data-theme="dark"] .cm-editor .cm-selectionBackground {
+  background: rgba(255, 255, 255, 0.15) !important;
+}
