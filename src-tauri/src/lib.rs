@@ -646,8 +646,10 @@ async fn list_active_queries(state: State<'_, AppState>) -> Result<Vec<String>, 
 }
 
 #[tauri::command]
-async fn read_plan_file(workspace_path: String, plan_filename: String) -> Result<String, String> {
-    let plan_path = Path::new(&workspace_path)
+async fn read_plan_file(_workspace_path: String, plan_filename: String) -> Result<String, String> {
+    // Claude Code writes plan files to ~/.claude/plans/ (user's home directory)
+    let home = std::env::var("HOME").map_err(|_| "Could not determine home directory")?;
+    let plan_path = Path::new(&home)
         .join(".claude")
         .join("plans")
         .join(&plan_filename);
@@ -658,8 +660,10 @@ async fn read_plan_file(workspace_path: String, plan_filename: String) -> Result
 }
 
 #[tauri::command]
-async fn list_plan_files(workspace_path: String) -> Result<Vec<String>, String> {
-    let plans_dir = Path::new(&workspace_path)
+async fn list_plan_files(_workspace_path: String) -> Result<Vec<String>, String> {
+    // Claude Code writes plan files to ~/.claude/plans/ (user's home directory)
+    let home = std::env::var("HOME").map_err(|_| "Could not determine home directory")?;
+    let plans_dir = Path::new(&home)
         .join(".claude")
         .join("plans");
 
@@ -671,21 +675,25 @@ async fn list_plan_files(workspace_path: String) -> Result<Vec<String>, String> 
         .await
         .map_err(|e| format!("Failed to read plans directory: {}", e))?;
 
-    let mut plan_files = Vec::new();
+    // Collect files with their modification times
+    let mut plan_files_with_time: Vec<(String, std::time::SystemTime)> = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
         let path = entry.path();
         if path.extension().map(|e| e == "md").unwrap_or(false) {
             if let Some(name) = path.file_name() {
-                plan_files.push(name.to_string_lossy().to_string());
+                if let Ok(metadata) = entry.metadata().await {
+                    if let Ok(modified) = metadata.modified() {
+                        plan_files_with_time.push((name.to_string_lossy().to_string(), modified));
+                    }
+                }
             }
         }
     }
 
-    // Sort by name (which often includes timestamps)
-    plan_files.sort();
-    plan_files.reverse(); // Most recent first
+    // Sort by modification time (most recent first)
+    plan_files_with_time.sort_by(|a, b| b.1.cmp(&a.1));
 
-    Ok(plan_files)
+    Ok(plan_files_with_time.into_iter().map(|(name, _)| name).collect())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

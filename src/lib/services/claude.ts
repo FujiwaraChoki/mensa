@@ -8,6 +8,7 @@ import type { ContentBlock, SettingSource, SlashCommand, PlanModeQuestion, Allow
 export interface ClaudeStreamEvent {
   type: 'text' | 'tool_use' | 'tool_result' | 'error' | 'done' | 'system_init' | 'cancelled' | 'ask_user_question' | 'exit_plan_mode';
   queryId?: string;
+  sessionId?: string;  // Claude backend session ID for resume functionality
   content?: string;
   tool?: {
     id?: string;
@@ -470,12 +471,14 @@ function handleClaudeMessage(
   // Handle system messages
   if (msg.type === 'system') {
     console.log('[claude] System message:', msg.subtype || 'unknown');
-    // Handle system init to extract slash commands
+    // Handle system init to extract slash commands and session_id
     if (msg.subtype === 'init' && msg.data) {
       const slashCommands = extractSlashCommands(msg.data);
-      if (slashCommands.length > 0) {
-        console.log('[claude] Found', slashCommands.length, 'slash commands');
-        onEvent({ type: 'system_init', slashCommands });
+      const sessionId = msg.data.session_id as string | undefined;
+
+      if (slashCommands.length > 0 || sessionId) {
+        console.log('[claude] Found', slashCommands.length, 'slash commands, session_id:', sessionId);
+        onEvent({ type: 'system_init', slashCommands, sessionId });
       }
     }
     return;

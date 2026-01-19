@@ -77,14 +77,18 @@
     const sessionId = currentSession.id;
     const answer = answers.join(', ');
 
+    // Set resume session ID to continue the Claude conversation
+    if (currentSession.claudeSessionId) {
+      resumeSessionId = currentSession.claudeSessionId;
+    }
+
     // Clear the pending question
     sessionStore.clearPendingQuestion(sessionId);
 
     // Add the user's answer as a message
     sessionStore.addMessage(sessionId, { role: 'user', content: answer, blocks: [] });
 
-    // Continue the query with the answer
-    // The answer will be sent as a tool result in the next query
+    // Continue the query with the answer - resuming the same Claude session
     await queryClaudeReal(sessionId, answer);
   }
 
@@ -93,13 +97,18 @@
 
     const sessionId = currentSession.id;
 
+    // Set resume session ID to continue the Claude conversation
+    if (currentSession.claudeSessionId) {
+      resumeSessionId = currentSession.claudeSessionId;
+    }
+
     // Mark plan as approved and exit plan mode
     sessionStore.approvePlan(sessionId);
 
     // Add a message indicating plan approval
     sessionStore.addMessage(sessionId, { role: 'user', content: 'Plan approved. Proceeding with implementation.', blocks: [] });
 
-    // Continue with execution mode (acceptEdits)
+    // Continue with execution mode (acceptEdits) - resuming the same Claude session
     await queryClaudeReal(sessionId, 'The user has approved the plan. Please proceed with the implementation.');
   }
 
@@ -578,9 +587,13 @@
             break;
 
           case 'system_init':
-            console.log('[chat] RECEIVED system_init, slash commands:', event.slashCommands?.length);
+            console.log('[chat] RECEIVED system_init, slash commands:', event.slashCommands?.length, 'sessionId:', event.sessionId);
             if (event.slashCommands && event.slashCommands.length > 0) {
               slashCommands.set(event.slashCommands);
+            }
+            // Store the Claude session ID for resume functionality
+            if (event.sessionId) {
+              sessionStore.setClaudeSessionId(sessionId, event.sessionId);
             }
             break;
 
@@ -601,22 +614,34 @@
               sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
               scrollToBottom();
             } else {
-              // Fallback: read the most recent plan file (async)
+              // Fallback: read the most recent plan file from ~/.claude/plans/
               invoke<string[]>('list_plan_files', { workspacePath: workingDir })
                 .then(planFiles => {
                   if (planFiles.length > 0) {
+                    console.log('[chat] Found plan files:', planFiles.slice(0, 3));
                     return invoke<string>('read_plan_file', {
                       workspacePath: workingDir,
                       planFilename: planFiles[0]
                     }).then(planContent => {
+                      console.log('[chat] Read plan content, length:', planContent.length);
                       sessionStore.setPlanFile(sessionId, planFiles[0], planContent);
                       sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
                       scrollToBottom();
                     });
+                  } else {
+                    console.warn('[chat] No plan files found in ~/.claude/plans/');
+                    // Still show approval UI with a message about missing plan
+                    sessionStore.setPlanFile(sessionId, 'plan.md', '*Plan file not found. Claude may still be writing it, or it was not created.*');
+                    sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
+                    scrollToBottom();
                   }
                 })
                 .catch(e => {
                   console.error('[chat] Failed to read plan file:', e);
+                  // Show error in plan approval UI
+                  sessionStore.setPlanFile(sessionId, 'plan.md', `*Error reading plan: ${e}*`);
+                  sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
+                  scrollToBottom();
                 });
             }
             break;
