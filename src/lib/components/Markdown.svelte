@@ -1,11 +1,22 @@
 <script lang="ts">
   import { marked } from 'marked';
+  import markedKatex from 'marked-katex-extension';
+  import 'katex/dist/katex.min.css';
 
   interface Props {
     content: string;
   }
 
   let { content }: Props = $props();
+
+  // Configure KaTeX extension
+  const katexOptions = {
+    throwOnError: false,
+    displayMode: false
+  };
+
+  // Use the KaTeX extension
+  marked.use(markedKatex(katexOptions));
 
   // Configure marked for safe rendering
   marked.setOptions({

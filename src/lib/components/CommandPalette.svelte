@@ -91,8 +91,8 @@
 
 <svelte:window on:keydown={handleKeydown} />
 
-<div class="backdrop" onclick={handleBackdropClick} onkeydown={handleKeydown} role="button" tabindex="-1" transition:fade={{ duration: 100 }}>
-  <div class="palette" transition:fly={{ y: -20, duration: 150 }}>
+<div class="backdrop" onclick={handleBackdropClick} onkeydown={handleKeydown} role="button" tabindex="-1" transition:fade={{ duration: 150 }}>
+  <div class="palette" transition:fly={{ y: -10, duration: 150 }}>
     <div class="search-box">
       <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="11" cy="11" r="8"/>

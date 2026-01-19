@@ -48,7 +48,7 @@
 
 <div class="onboarding">
   {#if step === 'welcome'}
-    <div class="step" in:fly={{ y: 20, duration: 400, easing: cubicOut }} out:fade={{ duration: 150 }}>
+    <div class="step" in:fly={{ y: 20, duration: 300, easing: cubicOut }} out:fly={{ y: -20, duration: 200 }}>
       <span class="step-label">01</span>
       <h1 class="title">mensa</h1>
       <p class="subtitle">Your minimal interface to Claude Code</p>
@@ -58,7 +58,7 @@
       </button>
     </div>
   {:else if step === 'workspace'}
-    <div class="step" in:fly={{ y: 20, duration: 400, easing: cubicOut }} out:fade={{ duration: 150 }}>
+    <div class="step" in:fly={{ y: 20, duration: 300, easing: cubicOut }} out:fly={{ y: -20, duration: 200 }}>
       <span class="step-label">02</span>
       <h2 class="heading">Choose workspace</h2>
       <p class="description">Select a directory for Claude to work in</p>
@@ -80,7 +80,7 @@
       </button>
     </div>
   {:else if step === 'ready'}
-    <div class="step" in:fly={{ y: 20, duration: 400, easing: cubicOut }} out:fade={{ duration: 150 }}>
+    <div class="step" in:fly={{ y: 20, duration: 300, easing: cubicOut }} out:fly={{ y: -20, duration: 200 }}>
       <span class="step-label">03</span>
       <h2 class="heading">Ready</h2>
       <p class="description">

@@ -90,9 +90,49 @@ struct SessionEntry {
     modified: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SessionsIndex {
     entries: Vec<SessionEntry>,
+}
+
+#[tauri::command]
+async fn delete_session(workspace_path: String, session_id: String) -> Result<bool, String> {
+    let sanitized = workspace_path.replace("/", "-");
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let sessions_index_path = format!("{}/.claude/projects/{}/sessions-index.json", home, sanitized);
+    let session_file_path = format!("{}/.claude/projects/{}/{}.jsonl", home, sanitized, session_id);
+
+    // Remove from sessions-index.json
+    let index_path = Path::new(&sessions_index_path);
+    if index_path.exists() {
+        let content = tokio::fs::read_to_string(index_path)
+            .await
+            .map_err(|e| format!("Failed to read sessions index: {}", e))?;
+
+        let mut index: SessionsIndex = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse sessions index: {}", e))?;
+
+        // Filter out the session to delete
+        index.entries.retain(|e| e.session_id != session_id);
+
+        // Write back
+        let updated_content = serde_json::to_string_pretty(&index)
+            .map_err(|e| format!("Failed to serialize sessions index: {}", e))?;
+
+        tokio::fs::write(index_path, updated_content)
+            .await
+            .map_err(|e| format!("Failed to write sessions index: {}", e))?;
+    }
+
+    // Delete the session file
+    let session_path = Path::new(&session_file_path);
+    if session_path.exists() {
+        tokio::fs::remove_file(session_path)
+            .await
+            .map_err(|e| format!("Failed to delete session file: {}", e))?;
+    }
+
+    Ok(true)
 }
 
 #[tauri::command]
@@ -450,6 +490,7 @@ async fn query_claude(
     config: Option<String>,
     resume_session: Option<String>,
     has_attachments: Option<bool>,
+    tool_result: Option<String>,
 ) -> Result<String, String> {
     // Generate unique query ID
     let query_id = Uuid::new_v4().to_string();
@@ -516,6 +557,11 @@ async fn query_claude(
 
     if has_attachments == Some(true) {
         args.push("--has-attachments".to_string());
+    }
+
+    if let Some(tr) = tool_result {
+        args.push("--tool-result".to_string());
+        args.push(tr);
     }
 
     let node_binary = find_node_binary();
@@ -709,6 +755,7 @@ pub fn run() {
             cancel_query,
             list_active_queries,
             list_sessions,
+            delete_session,
             load_session_messages,
             read_plan_file,
             list_plan_files

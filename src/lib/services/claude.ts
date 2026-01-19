@@ -107,7 +107,8 @@ export async function queryClaudeStreaming(
   workingDirectory: string,
   onEvent: StreamCallback,
   config?: ClaudeQueryConfig,
-  resumeSession?: string
+  resumeSession?: string,
+  toolResult?: { tool_use_id: string; content: unknown }
 ): Promise<QueryHandle> {
   const hasAttachments = typeof prompt !== 'string';
   const promptStr = hasAttachments ? JSON.stringify(prompt) : prompt;
@@ -205,7 +206,8 @@ export async function queryClaudeStreaming(
       workingDir: workingDirectory,
       config: config ? JSON.stringify(config) : null,
       resumeSession: resumeSession || null,
-      hasAttachments: hasAttachments || null
+      hasAttachments: hasAttachments || null,
+      toolResult: toolResult ? JSON.stringify(toolResult) : null
     });
     console.log('[claude] invoke query_claude returned queryId:', resolvedQueryId);
 

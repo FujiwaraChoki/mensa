@@ -2,6 +2,8 @@
 
 A GUI wrapper and IDE for [Claude Code](https://github.com/anthropics/claude-code) - Anthropic's CLI for Claude.
 
+![Mensa Screenshot](static/screenshot_1.png)
+
 ## Features
 
 - Chat interface for Claude Code conversations

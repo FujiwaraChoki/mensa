@@ -65,7 +65,7 @@
 <svelte:window on:keydown={handleKeydown} />
 
 <div class="backdrop" onclick={handleBackdropClick} onkeydown={handleKeydown} role="button" tabindex="-1" transition:fade={{ duration: 150 }}>
-  <div class="modal" transition:fly={{ y: 20, duration: 200 }}>
+  <div class="modal" transition:fly={{ y: 10, duration: 150 }}>
     <header class="modal-header">
       <h2>Settings</h2>
       <button class="close-btn" onclick={onclose} aria-label="Close settings">

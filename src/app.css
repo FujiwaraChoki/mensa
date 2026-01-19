@@ -13,6 +13,17 @@
   --gray-300: #d4d4d4;
   --gray-400: #a3a3a3;
   --gray-500: #737373;
+  --gray-600: #525252;
+  --gray-700: #404040;
+
+  /* Semantic colors */
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --red-100: #fee2e2;
+  --red-400: #f87171;
+  --red-500: #ef4444;
+  --red-600: #dc2626;
+  --green-500: #22c55e;
 
   /* Glass effect colors */
   --glass-gradient-start: rgba(255, 255, 255, 0.8);
@@ -59,10 +70,20 @@
   --gray-300: #404040;
   --gray-400: #6b6b6b;
   --gray-500: #9a9a9a;
+  --gray-600: #a3a3a3;
+  --gray-700: #b8b8b8;
   --glass-gradient-start: rgba(30, 30, 30, 0.8);
   --glass-gradient-end: rgba(30, 30, 30, 0.4);
   --glass-border: rgba(255, 255, 255, 0.1);
   --glass-shadow: rgba(0, 0, 0, 0.4);
+  /* Semantic colors - dark mode */
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --red-100: #450a0a;
+  --red-400: #f87171;
+  --red-500: #ef4444;
+  --red-600: #fca5a5;
+  --green-500: #22c55e;
 }
 
 *, *::before, *::after {

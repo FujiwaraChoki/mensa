@@ -42,7 +42,7 @@
   }
 </script>
 
-<aside class="tools-panel" in:fly={{ x: 20, duration: 200 }} out:fly={{ x: 20, duration: 150 }}>
+<aside class="tools-panel" transition:fly={{ x: 20, duration: 150 }}>
   <div class="tools-header">
     <span class="tools-title">Activity</span>
     {#if toolActivity.recent.length > 0}

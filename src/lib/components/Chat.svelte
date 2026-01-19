@@ -17,12 +17,13 @@
   import CommandPalette from './CommandPalette.svelte';
   import InlineTool from './InlineTool.svelte';
   import SubagentGroup from './SubagentGroup.svelte';
-  import SessionTabs from './SessionTabs.svelte';
   import QuestionCard from './QuestionCard.svelte';
   import PlanApproval from './PlanApproval.svelte';
   import VimInput from './VimInput.svelte';
+  import Sidebar from './Sidebar.svelte';
 
   let inputValue = $state('');
+  let showSidebar = $state(false);
   let vimInputRef: { focus: () => void; getView: () => any; getVimMode: () => 'normal' | 'insert' | 'visual' } | undefined;
   let vimMode = $state<'normal' | 'insert' | 'visual'>('normal');
   let showSettings = $state(false);
@@ -78,7 +79,19 @@
     if (!currentSession?.pendingQuestion || !currentSession.pendingQuestionToolUseId) return;
 
     const sessionId = currentSession.id;
+    const question = currentSession.pendingQuestion;
+    const toolUseId = currentSession.pendingQuestionToolUseId;
     const answer = answers.join(', ');
+
+    // Format answer: { "Question text?": "Selected Option" }
+    const answersRecord: Record<string, string> = {
+      [question.question]: answer
+    };
+
+    const toolResultContent = {
+      questions: [question],
+      answers: answersRecord
+    };
 
     // Set resume session ID to continue the Claude conversation
     if (currentSession.claudeSessionId) {
@@ -89,10 +102,10 @@
     sessionStore.clearPendingQuestion(sessionId);
 
     // Add the user's answer as a message
-    sessionStore.addMessage(sessionId, { role: 'user', content: answer, blocks: [] });
+    sessionStore.addMessage(sessionId, { role: 'user', content: `Answer: ${answer}`, blocks: [] });
 
-    // Continue the query with the answer - resuming the same Claude session
-    await queryClaudeReal(sessionId, answer);
+    // Send tool_result instead of plain text
+    await queryClaudeWithToolResult(sessionId, toolUseId, toolResultContent);
   }
 
   async function handleApprovePlan() {
@@ -361,6 +374,13 @@
   }
 
   async function handleKeydown(e: KeyboardEvent) {
+    // Escape to stop streaming
+    if (e.key === 'Escape' && isStreaming) {
+      e.preventDefault();
+      await stopStream();
+      return;
+    }
+
     // Shift+Tab to toggle plan mode
     if (e.key === 'Tab' && e.shiftKey && !isStreaming) {
       e.preventDefault();
@@ -425,6 +445,13 @@
     }
   }
 
+  async function stopStream() {
+    const sessionId = sessionStore.activeSessionId;
+    if (!sessionId) return;
+
+    await sessionStore.cancelSession(sessionId);
+  }
+
   async function sendMessage() {
     const content = inputValue.trim();
     const attachments = [...pendingAttachments.all];
@@ -476,8 +503,9 @@
         : []
     };
 
-    // Capture resume session ID and clear it
-    const currentResumeSession = resumeSessionId;
+    // Use resumeSessionId if set, otherwise use the session's stored claudeSessionId
+    // This ensures subsequent messages in the same chat continue the same Claude session
+    const currentResumeSession = resumeSessionId || session?.claudeSessionId;
     resumeSessionId = null;
 
     try {
@@ -669,6 +697,186 @@
       }, config, currentResumeSession || undefined);
 
       // Store the query handle for cancellation
+      sessionStore.setQueryHandle(sessionId, handle);
+
+    } catch (error) {
+      sessionStore.updateLastMessage(sessionId, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      sessionStore.setStatus(sessionId, 'error', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  async function queryClaudeWithToolResult(
+    sessionId: string,
+    toolUseId: string,
+    content: unknown
+  ) {
+    console.log('[queryClaudeWithToolResult] CALLED with toolUseId:', toolUseId);
+
+    // Set session to streaming
+    sessionStore.setStatus(sessionId, 'streaming');
+    sessionStore.addMessage(sessionId, { role: 'assistant', content: '', blocks: [] });
+
+    const workingDir = appConfig.workspace?.path || '.';
+    const session = sessionStore.getSession(sessionId);
+    const config: ClaudeQueryConfig = {
+      permissionMode: session?.planMode ? 'plan' : appConfig.claude.permissionMode,
+      maxTurns: appConfig.claude.maxTurns,
+      mcpServers: appConfig.claude.mcpServers,
+      enableSkills: appConfig.claude.skills.enabled,
+      settingSources: appConfig.claude.skills.enabled
+        ? appConfig.claude.skills.settingSources
+        : []
+    };
+
+    // Use resumeSessionId if set, otherwise use the session's stored claudeSessionId
+    // This ensures subsequent messages in the same chat continue the same Claude session
+    const currentResumeSession = resumeSessionId || session?.claudeSessionId;
+    resumeSessionId = null;
+
+    try {
+      let blockOrder = 0;
+      const handle = await queryClaudeStreaming(
+        '', // Empty prompt - we're sending a tool_result
+        workingDir,
+        (event: ClaudeStreamEvent) => {
+          console.log('[chat] RECEIVED event:', event.type, 'for session:', sessionId);
+
+          switch (event.type) {
+            case 'text':
+              if (event.content) {
+                sessionStore.appendTextToLast(sessionId, event.content, ++blockOrder);
+                scrollToBottom();
+              }
+              break;
+
+            case 'tool_use':
+              console.log('[chat] RECEIVED tool_use:', event);
+              if (event.tool) {
+                console.log('[chat] Adding tool:', event.tool.name, 'input:', event.tool.input);
+                const toolKey = event.tool.id || event.tool.name;
+                const toolInput = typeof event.tool.input === 'string'
+                  ? event.tool.input
+                  : JSON.stringify(event.tool.input, null, 2);
+
+                const isTaskTool = event.tool.name === 'Task';
+                let parentSubagentId: string | undefined;
+
+                if (isTaskTool) {
+                  let description = '';
+                  let subagentType = 'Task';
+                  try {
+                    const parsed = typeof event.tool.input === 'string'
+                      ? JSON.parse(event.tool.input)
+                      : event.tool.input;
+                    description = parsed?.description || '';
+                    subagentType = parsed?.subagent_type || 'Task';
+                  } catch {
+                    // Ignore parse errors
+                  }
+
+                  sessionStore.startSubagent(
+                    sessionId,
+                    event.tool.id || toolKey,
+                    description,
+                    subagentType
+                  );
+                } else {
+                  const activeSubagent = sessionStore.getActiveSubagent(sessionId);
+                  if (activeSubagent) {
+                    parentSubagentId = activeSubagent.id;
+                  }
+                }
+
+                const messageToolId = sessionStore.addToolToLast(sessionId, {
+                  tool: event.tool.name,
+                  status: 'running',
+                  input: toolInput,
+                  toolUseId: event.tool.id
+                }, true, ++blockOrder, parentSubagentId);
+
+                if (messageToolId) {
+                  sessionStore.addPendingTool(sessionId, toolKey, messageToolId);
+
+                  if (parentSubagentId) {
+                    sessionStore.addChildToolToSubagent(sessionId, parentSubagentId, messageToolId);
+                  }
+                }
+              }
+              break;
+
+            case 'tool_result':
+              console.log('[chat] RECEIVED tool_result:', event);
+              if (event.tool?.name) {
+                const toolKey = event.tool.id || event.tool.name;
+                const toolId = sessionStore.popPendingTool(sessionId, toolKey);
+
+                if (toolId) {
+                  sessionStore.completeTool(sessionId, toolId, event.tool.result);
+
+                  const sess = sessionStore.sessions.get(sessionId);
+                  const tool = sess?.tools.find(t => t.id === toolId);
+                  if (tool?.tool === 'Task') {
+                    sessionStore.completeSubagent(sessionId, event.tool.id || toolKey);
+                  }
+                }
+              }
+              break;
+
+            case 'error':
+              console.log('[chat] RECEIVED error:', event.error);
+              sessionStore.updateLastMessage(sessionId, `Error: ${event.error}`);
+              sessionStore.setStatus(sessionId, 'error', event.error);
+              break;
+
+            case 'cancelled':
+              console.log('[chat] RECEIVED cancelled:', event.reason);
+              sessionStore.setStatus(sessionId, 'cancelled');
+              break;
+
+            case 'system_init':
+              if (event.slashCommands && event.slashCommands.length > 0) {
+                slashCommands.set(event.slashCommands);
+              }
+              if (event.sessionId) {
+                sessionStore.setClaudeSessionId(sessionId, event.sessionId);
+              }
+              break;
+
+            case 'ask_user_question':
+              if (event.questions && event.questions.length > 0 && event.toolUseId) {
+                sessionStore.setPendingQuestion(sessionId, event.questions[0], event.toolUseId);
+                scrollToBottom();
+              }
+              break;
+
+            case 'exit_plan_mode':
+              if (event.planContent) {
+                sessionStore.setPlanFile(sessionId, 'plan.md', event.planContent);
+                sessionStore.setPlanApprovalPending(sessionId, true, event.allowedPrompts);
+                scrollToBottom();
+              }
+              break;
+
+            case 'done':
+              console.log('[chat] RECEIVED done');
+              sessionStore.clearPendingTools(sessionId);
+              const activeGroup = sessionStore.getActiveSubagent(sessionId);
+              if (activeGroup) {
+                sessionStore.completeSubagent(sessionId, activeGroup.taskToolId);
+              }
+              const currentSess = sessionStore.sessions.get(sessionId);
+              if (currentSess?.status === 'streaming') {
+                sessionStore.setStatus(sessionId, 'completed');
+                sendCompletionNotification();
+              }
+              break;
+          }
+        },
+        config,
+        currentResumeSession || undefined,
+        { tool_use_id: toolUseId, content }  // Pass tool_result
+      );
+
       sessionStore.setQueryHandle(sessionId, handle);
 
     } catch (error) {
@@ -870,12 +1078,22 @@
       e.preventDefault();
       showSettings = true;
     }
+    // ⌘ + B to toggle sidebar
+    if (e.metaKey && e.key === 'b') {
+      e.preventDefault();
+      showSidebar = !showSidebar;
+    }
     // ⌘ + Shift + R to reset app (dev only)
     if (e.metaKey && e.shiftKey && e.key === 'r') {
       e.preventDefault();
       appConfig.reset();
       sessionStore.clearAll();
       window.location.reload();
+    }
+    // ⌘ + O to open new workspace
+    if (e.metaKey && e.key === 'o') {
+      e.preventDefault();
+      selectNewWorkspace();
     }
   }
 </script>
@@ -903,7 +1121,7 @@
         </button>
 
         {#if showWorkspaceMenu}
-          <div class="workspace-menu" in:fly={{ y: -8, duration: 150 }} out:fade={{ duration: 100 }}>
+          <div class="workspace-menu" transition:fly={{ y: -8, duration: 150 }}>
             <button class="menu-item" onclick={selectNewWorkspace}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -972,10 +1190,19 @@
     </div>
   </header>
 
-  <!-- Session Tabs -->
-  <SessionTabs oncreate={startNewThread} />
-
   <div class="main">
+    <!-- Sidebar -->
+    <Sidebar
+      visible={showSidebar}
+      onselect={async (claudeSessionId) => {
+        // Load session history (creates a new session and switches to it)
+        await loadSessionHistory(claudeSessionId);
+        // Focus input so user can type next message
+        setTimeout(() => inputEl?.focus(), 50);
+      }}
+      oncreate={startNewThread}
+    />
+
     <!-- Chat column (messages + input) -->
     <div class="chat-column">
       <div class="messages-container" bind:this={messagesEl}>
@@ -997,7 +1224,7 @@
             </div>
           {:else}
             <div class="messages-list">
-              {#each currentMessages as message (message.id)}
+              {#each currentMessages.filter(m => m.content !== '[Request interrupted by user]') as message (message.id)}
                 <div
                   class="message"
                   class:user={message.role === 'user'}
@@ -1261,19 +1488,27 @@
                 <path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/>
               </svg>
             </button>
-            <button
-              class="send-btn"
-              disabled={(!inputValue.trim() && pendingAttachments.count === 0) || isStreaming}
-              onclick={sendMessage}
-            >
-              {#if isStreaming}
-                <span class="spinner"></span>
-              {:else}
+            {#if isStreaming}
+              <button
+                class="stop-btn"
+                onclick={stopStream}
+                title="Stop generating"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="2"/>
+                </svg>
+              </button>
+            {:else}
+              <button
+                class="send-btn"
+                disabled={!inputValue.trim() && pendingAttachments.count === 0}
+                onclick={sendMessage}
+              >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M5 12h14M12 5l7 7-7 7"/>
                 </svg>
-              {/if}
-            </button>
+              </button>
+            {/if}
           </div>
 
           <!-- Slash command autocomplete menu -->
@@ -1360,7 +1595,7 @@
 
     <!-- Drag overlay -->
     {#if isDragging}
-      <div class="drag-overlay" in:fade={{ duration: 100 }} out:fade={{ duration: 100 }}>
+      <div class="drag-overlay" transition:fade={{ duration: 100 }}>
         <div class="drag-content">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -1401,10 +1636,9 @@
     aria-modal="true"
     aria-label="Switch session"
     tabindex="-1"
-    in:fade={{ duration: 100 }}
-    out:fade={{ duration: 75 }}
+    transition:fade={{ duration: 150 }}
   >
-    <div class="session-picker" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="listbox" tabindex="-1" in:fly={{ y: -10, duration: 150 }}>
+    <div class="session-picker" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="listbox" tabindex="-1" transition:fly={{ y: -10, duration: 150 }}>
       <div class="session-picker-header">
         <span>Switch Session</span>
         <kbd>⌘T</kbd>
@@ -1450,8 +1684,7 @@
     aria-modal="true"
     aria-label="Image preview"
     tabindex="-1"
-    in:fade={{ duration: 150 }}
-    out:fade={{ duration: 100 }}
+    transition:fade={{ duration: 150 }}
   >
     <button class="lightbox-close" onclick={() => lightboxImage = null} aria-label="Close">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1820,9 +2053,14 @@
   .input-inner {
     width: 100%;
     max-width: 680px;
+    position: relative;
   }
 
   .vim-mode-indicator {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    margin-bottom: 6px;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     font-weight: 600;
@@ -1831,7 +2069,6 @@
     border-radius: var(--radius-sm);
     background: var(--gray-200);
     color: var(--gray-500);
-    margin-bottom: 6px;
     transition: all var(--transition-fast);
     width: fit-content;
   }
@@ -1979,6 +2216,31 @@
     border-top-color: var(--white);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
+  }
+
+  /* Stop button */
+  .stop-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--red-500, #ef4444);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .stop-btn:hover {
+    background: var(--red-600, #dc2626);
+  }
+
+  .stop-btn svg {
+    width: 14px;
+    height: 14px;
+    color: var(--white);
   }
 
   /* Plan mode button */

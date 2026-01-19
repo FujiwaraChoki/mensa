@@ -132,9 +132,11 @@
 
   // Update editor content from external value changes
   $effect(() => {
-    if (view && view.state.doc.toString() !== value) {
+    // Read value first to ensure it's tracked as a dependency
+    const currentValue = value;
+    if (view && view.state.doc.toString() !== currentValue) {
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: value }
+        changes: { from: 0, to: view.state.doc.length, insert: currentValue }
       });
     }
   });

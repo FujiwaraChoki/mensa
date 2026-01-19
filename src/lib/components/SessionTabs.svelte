@@ -121,8 +121,8 @@
 </div>
 
 {#if showConfirmClose}
-  <div class="confirm-overlay" transition:fade={{ duration: 100 }}>
-    <div class="confirm-dialog" in:fly={{ y: -10, duration: 150 }}>
+  <div class="confirm-overlay" transition:fade={{ duration: 150 }}>
+    <div class="confirm-dialog" transition:fly={{ y: -10, duration: 150 }}>
       <p class="confirm-title">Cancel running query?</p>
       <p class="confirm-message">This session is still streaming. Closing it will cancel the query.</p>
       <div class="confirm-actions">

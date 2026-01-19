@@ -11,6 +11,7 @@ let configJson = '';
 let resumeSessionId = '';
 let hasAttachments = false;
 let queryId = '';
+let toolResultJson = '';
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--cwd' && args[i + 1]) {
@@ -25,6 +26,8 @@ for (let i = 0; i < args.length; i++) {
     queryId = args[++i];
   } else if (args[i] === '--has-attachments') {
     hasAttachments = true;
+  } else if (args[i] === '--tool-result' && args[i + 1]) {
+    toolResultJson = args[++i];
   } else if (!args[i].startsWith('--') && !prompt) {
     prompt = args[i];
   }
@@ -54,8 +57,8 @@ process.on('SIGINT', () => {
   }
 });
 
-if (!prompt) {
-  emit({ type: 'error', error: 'No prompt provided' });
+if (!prompt && !toolResultJson) {
+  emit({ type: 'error', error: 'No prompt or tool result provided' });
   process.exit(1);
 }
 
@@ -128,9 +131,34 @@ async function main() {
       options.mcpServers = mcpServers;
     }
 
-    // Parse prompt as content blocks if attachments are present
+    // Parse prompt as content blocks if attachments are present, or handle tool_result
     let queryPrompt;
-    if (hasAttachments) {
+    if (toolResultJson) {
+      try {
+        const toolResult = JSON.parse(toolResultJson);
+        console.error('[claude-query] Sending tool_result for tool_use_id:', toolResult.tool_use_id);
+
+        // Claude Agent SDK expects an async generator for tool_result messages
+        async function* generateToolResultMessage() {
+          yield {
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [{
+                type: 'tool_result',
+                tool_use_id: toolResult.tool_use_id,
+                content: JSON.stringify(toolResult.content)
+              }]
+            }
+          };
+        }
+        queryPrompt = generateToolResultMessage();
+      } catch (e) {
+        console.error('[claude-query] Failed to parse tool result:', e.message);
+        emit({ type: 'error', error: `Invalid tool result JSON: ${e.message}` });
+        process.exit(1);
+      }
+    } else if (hasAttachments) {
       try {
         const contentBlocks = JSON.parse(prompt);
         console.error('[claude-query] Parsed content blocks:', contentBlocks.length, 'blocks');
