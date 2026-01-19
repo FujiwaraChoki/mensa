@@ -22,12 +22,16 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.9",
+    "@codemirror/state": "^6.5.4",
+    "@codemirror/view": "^6.39.11",
     "@pierre/diffs": "^1.0.6",
+    "@replit/codemirror-vim": "^6.3.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-shell": "^2.3.4",
+    "codemirror": "^6.0.2",
     "marked": "^17.0.1",
     "nucleo-glass-icons": "^0.1.11"
   },

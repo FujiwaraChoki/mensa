@@ -139,6 +139,7 @@ export interface ClaudeConfig {
   maxTurns: number;
   mcpServers: MCPServerConfig[];
   skills: SkillsConfig;
+  vimMode: boolean;
 }
 
 export interface AppConfig {

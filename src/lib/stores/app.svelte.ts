@@ -10,7 +10,8 @@ const DEFAULT_CLAUDE_CONFIG: ClaudeConfig = {
   skills: {
     enabled: true,
     settingSources: ['user', 'project']
-  }
+  },
+  vimMode: false
 };
 
 // App configuration persisted to localStorage
@@ -119,6 +120,11 @@ function createAppConfig() {
 
     setSkillsSettingSources(sources: SettingSource[]) {
       claude = { ...claude, skills: { ...claude.skills, settingSources: sources } };
+      save();
+    },
+
+    setVimMode(enabled: boolean) {
+      claude = { ...claude, vimMode: enabled };
       save();
     },
 
