@@ -21,6 +21,12 @@
   import PlanApproval from './PlanApproval.svelte';
   import VimInput from './VimInput.svelte';
   import Sidebar from './Sidebar.svelte';
+  import TerminalPanel from './TerminalPanel.svelte';
+  import { terminalStore } from '$lib/stores/terminal.svelte';
+  import { gitStore } from '$lib/stores/git.svelte';
+  import { GitStatusPanel, CommitDialog, PRDialog } from './git';
+  import { ReviewLauncher, ReviewPanel } from './review';
+  import { reviewStore } from '$lib/stores/review.svelte';
 
   let inputValue = $state('');
   let showSidebar = $state(false);
@@ -175,6 +181,24 @@
   let mentionCurrentPath = $state(''); // Current directory being browsed
   let mentionItems = $state<MentionItem[]>([]);
 
+  // Track pending file load to prevent race conditions
+  let pendingFileLoadId = 0;
+
+  // Track focus timeout for cleanup
+  let focusTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  // Cleanup focus timeout and pending attachments on component unmount
+  $effect(() => {
+    return () => {
+      if (focusTimeoutId) {
+        clearTimeout(focusTimeoutId);
+        focusTimeoutId = null;
+      }
+      // Revoke any pending attachment URLs that were never sent
+      pendingAttachments.clear(true);
+    };
+  });
+
   // Computed: filtered slash commands based on input
   const filteredSlashCommands = $derived(() => {
     if (!slashFilter) return slashCommands.all;
@@ -288,10 +312,14 @@
       slashFilter = value.slice(1);
       slashMenuIndex = 0;
       showMentionMenu = false;
+      // Reset mention state when switching to slash menu
+      mentionMenuIndex = 0;
       return;
     } else {
       showSlashMenu = false;
       slashFilter = '';
+      // Reset slash menu index when closing
+      slashMenuIndex = 0;
     }
 
     // Check for @ mention trigger
@@ -305,21 +333,28 @@
 
       // Check if filter contains a path separator - load that directory
       const lastSlashIdx = filterText.lastIndexOf('/');
-      if (lastSlashIdx >= 0) {
-        const dirPath = filterText.substring(0, lastSlashIdx);
-        if (dirPath !== mentionCurrentPath) {
-          mentionCurrentPath = dirPath;
-          await loadMentionFiles(dirPath);
+
+      try {
+        if (lastSlashIdx >= 0) {
+          const dirPath = filterText.substring(0, lastSlashIdx);
+          if (dirPath !== mentionCurrentPath) {
+            mentionCurrentPath = dirPath;
+            await loadMentionFilesWithCancel(dirPath);
+          }
+          // Update filter to just the part after the last /
+          mentionFilter = filterText.substring(lastSlashIdx + 1);
+        } else if (mentionCurrentPath !== '') {
+          // Reset to root if no path separator
+          mentionCurrentPath = '';
+          await loadMentionFilesWithCancel('');
+        } else if (mentionItems.length === 0) {
+          // Initial load
+          await loadMentionFilesWithCancel('');
         }
-        // Update filter to just the part after the last /
-        mentionFilter = filterText.substring(lastSlashIdx + 1);
-      } else if (mentionCurrentPath !== '') {
-        // Reset to root if no path separator
-        mentionCurrentPath = '';
-        await loadMentionFiles('');
-      } else if (mentionItems.length === 0) {
-        // Initial load
-        await loadMentionFiles('');
+      } catch (error) {
+        console.error('[handleInput] Error loading mention files:', error);
+        // Don't break the menu, just show empty results
+        mentionItems = [];
       }
 
       showMentionMenu = true;
@@ -327,17 +362,29 @@
       showMentionMenu = false;
       mentionFilter = '';
       mentionStartIndex = -1;
+      // Reset mention menu index when closing
+      mentionMenuIndex = 0;
     }
   }
 
-  async function loadMentionFiles(relativePath: string) {
+  // Load mention files with cancellation support to prevent race conditions
+  async function loadMentionFilesWithCancel(relativePath: string) {
+    const loadId = ++pendingFileLoadId;
     const workspacePath = appConfig.workspace?.path;
+
     if (!workspacePath) {
       mentionItems = [];
       return;
     }
-    mentionItems = await listWorkspaceFiles(workspacePath, relativePath);
+
+    const items = await listWorkspaceFiles(workspacePath, relativePath);
+
+    // Only update if this is still the most recent request
+    if (loadId === pendingFileLoadId) {
+      mentionItems = items;
+    }
   }
+
 
   function selectSlashCommand(commandName: string) {
     inputValue = '/' + commandName + ' ';
@@ -347,22 +394,29 @@
   }
 
   async function selectMention(item: MentionItem) {
+    // Guard against invalid mentionStartIndex
+    const safeStartIndex = mentionStartIndex >= 0 ? mentionStartIndex : 0;
+
     // If it's a directory, navigate into it
     if (item.isDirectory) {
       const newPath = mentionCurrentPath ? `${mentionCurrentPath}/${item.displayName}` : item.displayName;
       // Replace the current @ mention with the directory path
-      const beforeAt = inputValue.substring(0, mentionStartIndex);
+      const beforeAt = inputValue.substring(0, safeStartIndex);
       inputValue = beforeAt + '@' + newPath + '/';
       mentionCurrentPath = newPath;
       mentionFilter = '';
       mentionMenuIndex = 0;
-      await loadMentionFiles(newPath);
-      inputEl?.focus();
+      try {
+        await loadMentionFilesWithCancel(newPath);
+      } catch (error) {
+        console.error('[selectMention] Error loading files:', error);
+      }
+      safeFocus();
       return;
     }
 
     // For files and skills, insert the completed mention
-    const beforeAt = inputValue.substring(0, mentionStartIndex);
+    const beforeAt = inputValue.substring(0, safeStartIndex);
     const prefix = item.type === 'file' ? '' : '/';
     inputValue = beforeAt + prefix + item.value + ' ';
 
@@ -370,7 +424,27 @@
     mentionFilter = '';
     mentionStartIndex = -1;
     mentionCurrentPath = '';
-    inputEl?.focus();
+    mentionMenuIndex = 0; // Reset index when closing
+    safeFocus();
+  }
+
+  // Safe focus helper that handles both input types and cleans up timeouts
+  function safeFocus() {
+    // Clear any pending focus timeout
+    if (focusTimeoutId) {
+      clearTimeout(focusTimeoutId);
+      focusTimeoutId = null;
+    }
+
+    // Schedule focus with cleanup tracking
+    focusTimeoutId = setTimeout(() => {
+      focusTimeoutId = null;
+      if (appConfig.claude.vimMode) {
+        vimInputRef?.focus();
+      } else {
+        inputEl?.focus();
+      }
+    }, 50);
   }
 
   async function handleKeydown(e: KeyboardEvent) {
@@ -531,6 +605,20 @@
               const toolInput = typeof event.tool.input === 'string'
                 ? event.tool.input
                 : JSON.stringify(event.tool.input, null, 2);
+
+              // Track Claude-modified files for Git integration
+              if (event.tool.name === 'Edit' || event.tool.name === 'Write') {
+                try {
+                  const parsed = typeof event.tool.input === 'string'
+                    ? JSON.parse(event.tool.input)
+                    : event.tool.input;
+                  if (parsed?.file_path) {
+                    gitStore.trackClaudeModifiedFile(parsed.file_path);
+                  }
+                } catch {
+                  // Ignore parse errors
+                }
+              }
 
               // Check if this is a Task tool (subagent)
               const isTaskTool = event.tool.name === 'Task';
@@ -757,6 +845,20 @@
                 const toolInput = typeof event.tool.input === 'string'
                   ? event.tool.input
                   : JSON.stringify(event.tool.input, null, 2);
+
+                // Track Claude-modified files for Git integration
+                if (event.tool.name === 'Edit' || event.tool.name === 'Write') {
+                  try {
+                    const parsed = typeof event.tool.input === 'string'
+                      ? JSON.parse(event.tool.input)
+                      : event.tool.input;
+                    if (parsed?.file_path) {
+                      gitStore.trackClaudeModifiedFile(parsed.file_path);
+                    }
+                  } catch {
+                    // Ignore parse errors
+                  }
+                }
 
                 const isTaskTool = event.tool.name === 'Task';
                 let parentSubagentId: string | undefined;
@@ -1083,6 +1185,11 @@
       e.preventDefault();
       showSidebar = !showSidebar;
     }
+    // ⌘ + R to open review launcher
+    if (e.metaKey && !e.shiftKey && e.key === 'r') {
+      e.preventDefault();
+      reviewStore.openReviewLauncher();
+    }
     // ⌘ + Shift + R to reset app (dev only)
     if (e.metaKey && e.shiftKey && e.key === 'r') {
       e.preventDefault();
@@ -1094,6 +1201,34 @@
     if (e.metaKey && e.key === 'o') {
       e.preventDefault();
       selectNewWorkspace();
+    }
+    // ⌘ + J to toggle terminal
+    if (e.metaKey && e.key === 'j') {
+      e.preventDefault();
+      terminalStore.toggle();
+    }
+    // ⌘ + G to toggle git panel
+    if (e.metaKey && e.key === 'g') {
+      e.preventDefault();
+      gitStore.togglePanel();
+      if (gitStore.showPanel && appConfig.workspace?.path) {
+        gitStore.refresh(appConfig.workspace?.path);
+      }
+    }
+    // ⌘ + Shift + K to open commit dialog
+    if (e.metaKey && e.shiftKey && e.key === 'k') {
+      e.preventDefault();
+      if (appConfig.workspace?.path) {
+        gitStore.refresh(appConfig.workspace?.path);
+        gitStore.openCommitDialog();
+      }
+    }
+    // ⌘ + Shift + P to create PR
+    if (e.metaKey && e.shiftKey && e.key === 'p') {
+      e.preventDefault();
+      if (appConfig.workspace?.path) {
+        gitStore.openPRDialog(appConfig.workspace?.path);
+      }
     }
   }
 </script>
@@ -1198,7 +1333,7 @@
         // Load session history (creates a new session and switches to it)
         await loadSessionHistory(claudeSessionId);
         // Focus input so user can type next message
-        setTimeout(() => inputEl?.focus(), 50);
+        safeFocus();
       }}
       oncreate={startNewThread}
     />
@@ -1488,6 +1623,18 @@
                 <path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/>
               </svg>
             </button>
+            <button
+              class="review-btn"
+              onclick={() => reviewStore.openReviewLauncher()}
+              disabled={isStreaming}
+              title="Code Review (⌘R)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/>
+                <rect x="9" y="3" width="6" height="4" rx="1"/>
+                <path d="M9 12l2 2 4-4"/>
+              </svg>
+            </button>
             {#if isStreaming}
               <button
                 class="stop-btn"
@@ -1591,6 +1738,9 @@
           </p>
         </div>
       </div>
+
+      <!-- Terminal Panel -->
+      <TerminalPanel />
     </div>
 
     <!-- Drag overlay -->
@@ -1622,7 +1772,7 @@
       // Load session history (creates a new session and switches to it)
       await loadSessionHistory(claudeSessionId);
       // Focus input so user can type next message
-      setTimeout(() => inputEl?.focus(), 50);
+      safeFocus();
     }}
   />
 {/if}
@@ -1704,6 +1854,31 @@
       />
     </button>
   </div>
+{/if}
+
+<!-- Git Integration -->
+{#if appConfig.workspace?.path}
+  <GitStatusPanel workingDir={appConfig.workspace?.path} />
+  <CommitDialog workingDir={appConfig.workspace?.path} onclose={() => gitStore.closeCommitDialog()} />
+  <PRDialog workingDir={appConfig.workspace?.path} onclose={() => gitStore.closePRDialog()} />
+{/if}
+
+<!-- Review Mode -->
+{#if reviewStore.showReviewLauncher}
+  <ReviewLauncher
+    onclose={() => reviewStore.closeReviewLauncher()}
+  />
+{/if}
+
+{#if reviewStore.showReviewPanel}
+  <ReviewPanel
+    onaskClaude={(context) => {
+      inputValue = context;
+      reviewStore.closeReviewPanel();
+      safeFocus();
+    }}
+    onclose={() => reviewStore.closeReviewPanel()}
+  />
 {/if}
 
 <style>
@@ -1895,6 +2070,7 @@
     flex-direction: column;
     min-width: 0;
     overflow: hidden;
+    position: relative;
   }
 
   /* Messages - centered with max-width */
@@ -2286,6 +2462,41 @@
 
   .plan-mode-btn.active svg {
     color: rgba(59, 130, 246, 0.9);
+  }
+
+  /* Review button */
+  .review-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--gray-100);
+    border: 1px solid var(--gray-200);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .review-btn:hover:not(:disabled) {
+    background: var(--gray-200);
+    border-color: var(--gray-300);
+  }
+
+  .review-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .review-btn svg {
+    width: 16px;
+    height: 16px;
+    color: var(--gray-500);
+  }
+
+  .review-btn:hover:not(:disabled) svg {
+    color: var(--gray-700);
   }
 
   /* Plan mode banner */

@@ -1,5 +1,7 @@
 // mensa - Tauri backend
 
+mod git;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -749,6 +751,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_pty::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             query_claude,
@@ -758,7 +761,28 @@ pub fn run() {
             delete_session,
             load_session_messages,
             read_plan_file,
-            list_plan_files
+            list_plan_files,
+            // Git commands
+            git::git_status,
+            git::git_diff,
+            git::git_stage,
+            git::git_unstage,
+            git::git_branch_info,
+            git::git_commit,
+            git::git_push,
+            git::git_log,
+            git::git_fetch,
+            git::git_pull,
+            git::git_discard,
+            git::check_gh_cli_available,
+            git::create_pull_request,
+            git::git_list_branches,
+            git::git_diff_commits,
+            // PR Review commands
+            git::list_prs,
+            git::fetch_pr_info,
+            git::fetch_pr_diff,
+            git::post_pr_review
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

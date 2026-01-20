@@ -18,6 +18,13 @@
 
   let { value = $bindable(''), placeholder = 'Message Claude...', disabled = false, onsubmit, oninput, onpaste, onmodechange }: Props = $props();
 
+  // Use refs to avoid stale closure issues - callbacks are accessed via these refs
+  // which always point to the current callback values
+  let onsubmitRef = $derived(onsubmit);
+  let oninputRef = $derived(oninput);
+  let onpasteRef = $derived(onpaste);
+  let onmodechangeRef = $derived(onmodechange);
+
   let editorContainer: HTMLDivElement;
   let view: EditorView | null = null;
   let currentVimMode = $state<'normal' | 'insert' | 'visual'>('normal');
@@ -141,8 +148,9 @@
     }
   });
 
-  // Update theme when it changes
+  // Update theme when it changes - explicitly depend on effectiveTheme
   $effect(() => {
+    const _theme = effectiveTheme; // Explicit dependency
     if (view) {
       view.dispatch({
         effects: themeCompartment.reconfigure(getThemeExtension())
@@ -159,20 +167,29 @@
     }
   });
 
+  // Track if this instance has registered mappings for cleanup
+  let hasRegisteredMappings = false;
+
   onMount(() => {
     // Map jj to Escape in insert mode
+    // Note: Vim mappings are global, but we track registration for potential cleanup
     Vim.map('jj', '<Esc>', 'insert');
 
     // Custom command to send message on Enter in normal mode
-    Vim.defineAction('sendMessage', () => {
-      onsubmit();
+    // Use a unique action name based on component instance to avoid conflicts
+    const actionName = 'sendMessage_' + crypto.randomUUID().slice(0, 8);
+    Vim.defineAction(actionName, () => {
+      // Access via ref to avoid stale closure
+      onsubmitRef();
     });
-    Vim.mapCommand('<CR>', 'action', 'sendMessage', {}, { context: 'normal' });
+    Vim.mapCommand('<CR>', 'action', actionName, {}, { context: 'normal' });
+    hasRegisteredMappings = true;
 
     const updateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         value = update.state.doc.toString();
-        oninput?.();
+        // Access via ref to get current callback, not stale closure
+        oninputRef?.();
       }
 
       // Track vim mode changes
@@ -190,17 +207,18 @@
             }
             if (newMode !== currentVimMode) {
               currentVimMode = newMode;
-              onmodechange?.(newMode);
+              // Access via ref to get current callback
+              onmodechangeRef?.(newMode);
             }
           }
         }
       }
     });
 
-    // Handle paste events
+    // Handle paste events - use ref to avoid stale closure
     const pasteHandler = EditorView.domEventHandlers({
       paste: (event) => {
-        onpaste?.(event);
+        onpasteRef?.(event);
         return false; // Let CodeMirror handle the paste
       }
     });
@@ -229,7 +247,13 @@
   });
 
   onDestroy(() => {
-    view?.destroy();
+    // Destroy the editor view - this cleans up all extensions and event listeners
+    if (view) {
+      view.destroy();
+      view = null;
+    }
+    // Note: Vim mappings are global singletons in @replit/codemirror-vim
+    // We can't easily unregister them, but using unique action names prevents conflicts
   });
 
   export function focus() {

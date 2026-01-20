@@ -178,3 +178,9 @@ export interface AllowedPrompt {
 
 // Re-export session types from the store for convenience
 export type { SessionStatus, SessionState } from '$lib/stores/sessions.svelte';
+
+// Re-export git types
+export * from './git';
+
+// Re-export review types
+export * from './review';

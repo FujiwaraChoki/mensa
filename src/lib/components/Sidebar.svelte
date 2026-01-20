@@ -3,6 +3,7 @@
   import { fade } from 'svelte/transition';
   import { appConfig } from '$lib/stores/app.svelte';
   import { sessionStore } from '$lib/stores/sessions.svelte';
+  import { reviewStore } from '$lib/stores/review.svelte';
 
   interface Props {
     visible: boolean;
@@ -36,6 +37,11 @@
   // Get claude session IDs of streaming sessions to filter from history
   const streamingClaudeSessionIds = $derived(
     new Set(streamingSessions.map(s => s.claudeSessionId).filter(Boolean))
+  );
+
+  // Get recent reviews (last 5)
+  const recentReviews = $derived(
+    reviewStore.reviewHistory.slice(0, 5)
   );
 
   $effect(() => {
@@ -125,6 +131,11 @@
       renaming = null;
     }
   }
+
+  function handleReviewClick(reviewId: string) {
+    reviewStore.loadHistoricalReview(reviewId);
+    reviewStore.openReviewPanel();
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} />
@@ -199,6 +210,53 @@
         {/each}
       {/if}
     </div>
+
+    <!-- Recent Reviews Section -->
+    {#if recentReviews.length > 0}
+      <div class="section">
+        <span class="section-label">Recent Reviews</span>
+        {#each recentReviews as review (review.id)}
+          <button
+            class="thread-item review-item"
+            onclick={() => handleReviewClick(review.id)}
+          >
+            <div class="thread-info">
+              <span class="thread-title">{review.preset.name}</span>
+              <span class="thread-meta">
+                <span class="review-stats">
+                  {#if review.stats.critical > 0}
+                    <span class="stat critical">{review.stats.critical}</span>
+                  {/if}
+                  {#if review.stats.warnings > 0}
+                    <span class="stat warning">{review.stats.warnings}</span>
+                  {/if}
+                  {#if review.stats.suggestions > 0}
+                    <span class="stat suggestion">{review.stats.suggestions}</span>
+                  {/if}
+                </span>
+                · {formatDate(review.createdAt.toISOString())}
+              </span>
+            </div>
+            <span class="review-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/>
+                <rect x="9" y="3" width="6" height="4" rx="1"/>
+                <path d="M9 12l2 2 4-4"/>
+              </svg>
+            </span>
+          </button>
+        {/each}
+        <button
+          class="new-review-btn-sidebar"
+          onclick={() => reviewStore.openReviewLauncher()}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          <span>New Review</span>
+        </button>
+      </div>
+    {/if}
   </div>
 
   <div class="sidebar-footer">
@@ -498,5 +556,83 @@
     width: 16px;
     height: 16px;
     flex-shrink: 0;
+  }
+
+  /* Review section styles */
+  .review-item {
+    position: relative;
+  }
+
+  .review-icon {
+    width: 16px;
+    height: 16px;
+    color: var(--gray-400);
+    flex-shrink: 0;
+  }
+
+  .review-icon svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .review-stats {
+    display: inline-flex;
+    gap: 4px;
+  }
+
+  .stat {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+  }
+
+  .stat.critical {
+    background: #fef2f2;
+    color: #dc2626;
+  }
+
+  .stat.warning {
+    background: #fffbeb;
+    color: #d97706;
+  }
+
+  .stat.suggestion {
+    background: #eff6ff;
+    color: #2563eb;
+  }
+
+  .new-review-btn-sidebar {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-top: 0.375rem;
+    background: var(--gray-50);
+    border: 1px dashed var(--gray-300);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--gray-500);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .new-review-btn-sidebar:hover {
+    background: var(--gray-100);
+    border-color: var(--gray-400);
+    color: var(--gray-700);
+  }
+
+  .new-review-btn-sidebar svg {
+    width: 14px;
+    height: 14px;
   }
 </style>
